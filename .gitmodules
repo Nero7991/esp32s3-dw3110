@@ -1,0 +1,6 @@
+[submodule "components/dw3000-driver"]
+	path = components/dw3000-driver
+	url = https://github.com/br101/dw3000-decadriver-source
+[submodule "components/libdeca"]
+	path = components/libdeca
+	url = https://github.com/br101/libdeca
