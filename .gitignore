@@ -1,0 +1,21 @@
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+
+# DevLM artifacts
+.devlm/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets
+.webui_secret_key
+
+# OS files
+.DS_Store
+Thumbs.db

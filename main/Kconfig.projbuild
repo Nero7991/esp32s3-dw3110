@@ -1,0 +1,13 @@
+menu "TWR Demo Configuration"
+
+    config TWR_INITIATOR
+        bool "TWR Initiator Mode"
+        default n
+        help
+            Enable this for the initiator device that sends ranging requests.
+            Disable for the responder device that answers ranging requests.
+
+            Initiator: MAC16 = 0x0002, sends to 0x0001
+            Responder: MAC16 = 0x0001, listens for requests
+
+endmenu
