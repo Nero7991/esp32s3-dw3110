@@ -12,6 +12,10 @@
 #include <freertos/task.h>
 #include <esp_log.h>
 #include <esp_err.h>
+#include <driver/gpio.h>
+
+#define EXTON_GPIO 43  // U0TXD pin - directly connected to EXTON on PCB
+#define FLOATING_GPIOS ((1ULL << 7) | (1ULL << 16) | (1ULL << 17))
 
 #include "dw3000_hw.h"
 #include "dwhw.h"
@@ -109,5 +113,29 @@ static void test_twr(void) {
 
 void app_main(void) {
     ESP_LOGI(TAG, "ESP-IDF TWR Demo Starting");
+
+    // Configure GPIO43 (U0TXD) as output high for EXTON
+    gpio_config_t exton_conf = {
+        .pin_bit_mask = (1ULL << EXTON_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&exton_conf);
+    gpio_set_level(EXTON_GPIO, 1);
+    ESP_LOGI(TAG, "EXTON (GPIO%d) set HIGH", EXTON_GPIO);
+
+    // Configure GPIO 7, 16, 17 as floating (high-impedance input)
+    gpio_config_t floating_conf = {
+        .pin_bit_mask = FLOATING_GPIOS,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&floating_conf);
+    ESP_LOGI(TAG, "GPIO 7, 16, 17 set to floating");
+
     test_twr();
 }
