@@ -26,9 +26,18 @@ const CONFIG_PATH = path.join(__dirname, '../../config/passive-tags.json');
 export class PollingScheduler {
   private passiveTags: PassiveTagConfig[] = [];
   private running = false;
-  private pollIntervalMs = 200;
-  private pollTimeoutMs = 300;
-  private pendingPoll: PendingPoll | null = null;
+  /* Inter-cycle pause (after all anchors polled for all tags). 0 = run
+   * continuously; the cycle wall time is bounded by WiFi RTT for the
+   * last poll's report-back. */
+  private pollIntervalMs = 0;
+  /* Per-poll timeout: WiFi RTT (~10–30 ms) + TWR exchange (~5 ms) + margin. */
+  private pollTimeoutMs = 80;
+  /* Inter-anchor spacing within a cycle. Must exceed the UWB TWR cycle
+   * (~5 ms POLL→RESP→FINAL→REPORT) so the tag's single RX channel doesn't
+   * collide. WiFi RTT for the previous anchor's report-back overlaps with
+   * this gap, so total cycle wall time ≈ (N-1)*spacing + RTT. */
+  private interAnchorSpacingMs = 8;
+  private pendingPolls: Map<string, PendingPoll> = new Map();
 
   // Injected dependencies
   private sendPollCommand: ((anchorDeviceId: number, tagMac: number) => boolean) | null = null;
@@ -84,19 +93,21 @@ export class PollingScheduler {
     }
   }
 
+  private static pollKey(anchorId: number, tagId: number): string {
+    return `${anchorId}:${tagId}`;
+  }
+
   /**
    * Called by websocket-server when a ranging report arrives.
    * Returns true if this report was consumed by a pending poll.
    */
   public onRangingReport(anchorId: number, tagId: number, distanceCm: number): boolean {
-    if (
-      this.pendingPoll &&
-      this.pendingPoll.anchorId === anchorId &&
-      this.pendingPoll.tagId === tagId
-    ) {
-      clearTimeout(this.pendingPoll.timeout);
-      this.pendingPoll.resolve(distanceCm);
-      this.pendingPoll = null;
+    const key = PollingScheduler.pollKey(anchorId, tagId);
+    const pending = this.pendingPolls.get(key);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      pending.resolve(distanceCm);
+      this.pendingPolls.delete(key);
       return true;
     }
     return false;
@@ -141,11 +152,11 @@ export class PollingScheduler {
 
   public stop(): void {
     this.running = false;
-    if (this.pendingPoll) {
-      clearTimeout(this.pendingPoll.timeout);
-      this.pendingPoll.resolve(null);
-      this.pendingPoll = null;
+    for (const pending of this.pendingPolls.values()) {
+      clearTimeout(pending.timeout);
+      pending.resolve(null);
     }
+    this.pendingPolls.clear();
     console.log('Passive polling stopped');
     if (this.onLog) this.onLog('info', 'Passive polling stopped');
   }
@@ -165,15 +176,31 @@ export class PollingScheduler {
           continue;
         }
 
-        for (const anchorId of anchorIds) {
+        /* Pipelined polling: fire each anchor's poll command spaced by
+         * interAnchorSpacingMs (just enough for the previous TWR to clear
+         * the UWB radio before the next anchor's POLL). Don't wait for
+         * the WiFi report-back round-trip — collect all promises in
+         * parallel and Promise.all them at the end. */
+        const promises: Promise<number | null>[] = [];
+        for (let i = 0; i < anchorIds.length; i++) {
           if (!this.running) break;
-          const dist = await this.pollTagFromAnchor(anchorId, tag.mac, tag.id);
-          if (dist !== null && this.onLog) {
-            this.onLog(
-              'info',
-              'Passive ranging',
-              `anchor=${anchorId} tag=0x${tag.id.toString(16).padStart(4, '0')} dist=${dist}cm`,
-            );
+          const anchorId = anchorIds[i];
+          promises.push(this.pollTagFromAnchor(anchorId, tag.mac, tag.id));
+          if (i < anchorIds.length - 1) {
+            await this.delay(this.interAnchorSpacingMs);
+          }
+        }
+        const results = await Promise.all(promises);
+        if (this.onLog) {
+          for (let i = 0; i < anchorIds.length; i++) {
+            const dist = results[i];
+            if (dist !== null) {
+              this.onLog(
+                'info',
+                'Passive ranging',
+                `anchor=${anchorIds[i]} tag=0x${tag.id.toString(16).padStart(4, '0')} dist=${dist}cm`,
+              );
+            }
           }
         }
       }
@@ -190,17 +217,18 @@ export class PollingScheduler {
     tagId: number,
   ): Promise<number | null> {
     return new Promise((resolve) => {
+      const key = PollingScheduler.pollKey(anchorId, tagId);
       const timeout = setTimeout(() => {
-        this.pendingPoll = null;
+        this.pendingPolls.delete(key);
         resolve(null);
       }, this.pollTimeoutMs);
 
-      this.pendingPoll = { resolve, anchorId, tagId, timeout };
+      this.pendingPolls.set(key, { resolve, anchorId, tagId, timeout });
 
       const sent = this.sendPollCommand!(anchorId, tagMac);
       if (!sent) {
         clearTimeout(timeout);
-        this.pendingPoll = null;
+        this.pendingPolls.delete(key);
         resolve(null);
       }
     });

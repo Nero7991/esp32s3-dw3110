@@ -253,6 +253,19 @@ class WebSocketManager {
           this.sendAnchorList(device.ws);
         }
       }
+      // Auto-start the polling scheduler when at least one anchor is up
+      // and we have tags configured. The scheduler is idempotent — calling
+      // start() while already running is a no-op.
+      if (!pollingScheduler.isRunning()
+          && pollingScheduler.getPassiveTags().length > 0) {
+        console.log('Auto-starting polling scheduler (anchor connected)');
+        pollingScheduler.start();
+        this.broadcastToDashboard({
+          type: 'passive_poll_status',
+          running: true,
+          tags: pollingScheduler.getPassiveTags(),
+        });
+      }
     }
 
     console.log(`Device ${msg.device_id} registered successfully. Total devices: ${this.devices.size}`);
