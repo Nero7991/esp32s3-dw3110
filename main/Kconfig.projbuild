@@ -1,13 +1,82 @@
-menu "TWR Demo Configuration"
+menu "UWB Positioning System Configuration"
+
+    choice DEVICE_MODE
+        prompt "Device Mode"
+        default DEVICE_MODE_TAG
+        help
+            Select whether this device operates as an anchor (fixed position responder)
+            or as a tag (mobile initiator).
+
+        config DEVICE_MODE_ANCHOR
+            bool "Anchor (Responder)"
+            help
+                Anchor mode: Fixed position, responds to ranging requests from tags.
+                Reports distance measurements to the positioning server.
+
+        config DEVICE_MODE_TAG
+            bool "Tag (Initiator)"
+            help
+                Tag mode: Mobile device that polls anchors sequentially.
+                Reports distance measurements to the positioning server for position calculation.
+
+        config DEVICE_MODE_TAG_PASSIVE
+            bool "Passive Tag (Responder only)"
+            help
+                Passive tag mode: Battery-powered UWB-only device.
+                Responds to anchor-initiated TWR polls. No WiFi needed.
+    endchoice
+
+    config DEVICE_MODE
+        int
+        default 0 if DEVICE_MODE_ANCHOR
+        default 1 if DEVICE_MODE_TAG
+        default 2 if DEVICE_MODE_TAG_PASSIVE
+
+    config DEVICE_ID
+        hex "Device ID"
+        default 0x0001
+        range 0x0001 0xFFFE
+        help
+            Unique 16-bit device identifier. Used as UWB MAC address.
+            Anchors typically use 0x0001-0x00FF, tags use 0x0100-0xFFFE.
+            If set to 0, a unique ID will be generated from the WiFi MAC.
+
+    config UWB_PANID
+        hex "UWB PAN ID"
+        default 0xDECA
+        help
+            UWB Personal Area Network ID. All devices in the same positioning
+            system must use the same PAN ID.
+
+    menu "WiFi Configuration"
+        config WIFI_SSID
+            string "WiFi SSID"
+            default "UWB_Network"
+            help
+                SSID of the WiFi network to connect to.
+
+        config WIFI_PASSWORD
+            string "WiFi Password"
+            default "uwb_password"
+            help
+                Password for the WiFi network.
+    endmenu
+
+    menu "Server Configuration"
+        config SERVER_URI
+            string "WebSocket Server URI"
+            default "ws://192.168.1.100:3000/ws"
+            help
+                WebSocket URI of the positioning server.
+                Format: ws://hostname:port/path or wss://hostname:port/path
+    endmenu
 
     config TWR_INITIATOR
-        bool "TWR Initiator Mode"
-        default n
+        bool
+        default n if DEVICE_MODE_ANCHOR
+        default y if DEVICE_MODE_TAG
+        default n if DEVICE_MODE_TAG_PASSIVE
         help
-            Enable this for the initiator device that sends ranging requests.
-            Disable for the responder device that answers ranging requests.
-
-            Initiator: MAC16 = 0x0002, sends to 0x0001
-            Responder: MAC16 = 0x0001, listens for requests
+            Internal: Sets TWR mode based on device mode selection.
 
 endmenu

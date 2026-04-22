@@ -19,8 +19,9 @@
 /** TWR_PROCESSING_DELAY: the processing delay may need to be increased for
  * different processor and IRQ handling speeds. On ESP32-S3, the ESP-IDF SPI
  * master driver adds significant per-transaction overhead (~50-80us each),
- * and the RX-to-TX path involves ~13 SPI transactions. */
-#define TWR_PROCESSING_DELAY 1100 /* us */
+ * and the RX-to-TX path involves ~13 SPI transactions.
+ * ESP32-S3 with FreeRTOS needs ~2500us to account for interrupt latency. */
+#define TWR_PROCESSING_DELAY 4000 /* us - increased to handle ESP32-S3 SPI + WiFi overhead */
 #define TWR_FAILED_VALUE	 UINT16_MAX
 #define TWR_OK_VALUE		 (UINT16_MAX - 1)
 #define TWR_MSG_GROUP		 0x20

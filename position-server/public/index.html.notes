@@ -1,0 +1,23 @@
+File: index.html
+Purpose: Single-page dashboard HTML for the UWB positioning system. Renders the floor plan canvas, statistics, device lists, tag positions, and a toggleable live log panel.
+
+Recent Changes:
+- Added log panel CSS: .log-toggle button (with .active state), .log-badge (unread count), .log-panel, .log-panel-header, .log-entries (scrollable 280px), .log-entry (3-column grid: time | level | body), .log-level color variants (info/warn/error), .log-detail, .log-empty
+- Added "Log" toggle button in header (calls toggleLog()), with an inline badge element for unread count
+- Added #log-panel div below .grid: contains header with title and Clear button, and #log-entries scrollable container
+
+Key Components:
+- #log-toggle: button that shows/hides the log panel; gains .active class when panel is visible
+- #log-badge: shows unread event count when panel is hidden; hidden when count is 0
+- #log-panel: the collapsible log panel, hidden by default (display:none)
+- #log-entries: scrollable container for .log-entry rows
+- .log-entry: grid row with .log-time, .log-level, .log-body (+ optional .log-detail)
+
+Dependencies:
+- app.js: toggleLog(), clearLog(), appendLogEntry(), rebuildLogPanel() manipulate DOM elements above
+- websocket-server.ts (compiled): pushes log_event messages consumed by app.js
+
+Architecture Notes:
+- Panel is hidden by default; JS in app.js controls visibility via style.display
+- Apple system font stack used throughout; monospace (SF Mono/Menlo) for log entries
+- Color palette: #007aff (info), #ff9f0a (warn), #ff453a (error), #86868b (secondary text)

@@ -12,7 +12,8 @@ ESP32-S3 with DW3110 UWB module implementation for two-way ranging (TWR). Uses Q
 
 ```bash
 # Source ESP-IDF environment first (required before any idf.py command)
-. /home/orencollaco/esp/v5.3.1/esp-idf/export.sh
+# IMPORTANT: Clear PYTHONPATH and set correct Python env to avoid package conflicts
+unset PYTHONPATH && export IDF_PYTHON_ENV_PATH=/home/orencollaco/.espressif/python_env/idf5.3_py3.11_env && . /home/orencollaco/esp/v5.3.1/esp-idf/export.sh
 
 # Build
 idf.py build
@@ -51,17 +52,31 @@ Qorvo Driver (components/dw3000-driver/dwt_uwb_driver/)
 - `libdeca` depends on `decadriver`
 - `decadriver` depends on ESP-IDF `driver` (GPIO/SPI)
 
+## Device Board Mapping
+
+| Port | Device | MAC | LED Color |
+|------|--------|-----|-----------|
+| ACM0 | Anchor 2 (0x0002) | 3c:dc:75:62:9d:10 | Blue |
+| ACM1 | Tag (0x0064) | 3c:0f:02:d7:3c:6c | Green |
+| ACM2 | Anchor 1 (0x0001) | 3c:dc:75:62:f1:4c | Blue |
+| ACM3 | Anchor 3 (0x0003) | dc:b4:d9:38:35:a8 | Blue |
+
+LED identification: Blue = Anchor, Green = Active Tag, Red = Passive Tag (WS2812 on GPIO48).
+
+Note: Port assignments may shift after USB re-enumeration. Use MAC address or LED color to identify boards.
+
 ## Pin Configuration (from sdkconfig)
 
 | Function | GPIO |
 |----------|------|
-| SPI MOSI | 10   |
-| SPI MISO | 9    |
-| SPI CLK  | 8    |
-| SPI CS   | 20   |
-| IRQ Reset| 5    |
-| Reset    | 3    |
+| SPI MOSI | 41   |
+| SPI MISO | 39   |
+| SPI CLK  | 40   |
+| SPI CS   | 42   |
+| IRQ      | 5    |
+| Reset    | 6    |
 | Wakeup   | 4    |
+| RGB LED  | 48   |
 
 ## Key Configuration Options
 

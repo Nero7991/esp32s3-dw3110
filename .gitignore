@@ -1,7 +1,20 @@
 build/
 sdkconfig
 sdkconfig.old
+sdkconfig.backup
+sdkconfig.anchor1
+sdkconfig.anchor1.patch
+sdkconfig.anchor_backup
 managed_components/
+
+# position-server runtime and build artefacts
+position-server/node_modules/
+position-server/dist/
+position-server/coverage/
+position-server/data/
+
+# Vendor-supplied ESP32-S3 dev board bundle (flash tool, demos, temp files)
+docs/ESP32-S3 Dev/
 
 # DevLM artifacts
 .devlm/

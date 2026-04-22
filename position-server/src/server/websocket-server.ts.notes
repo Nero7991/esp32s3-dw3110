@@ -1,0 +1,27 @@
+File: websocket-server.ts
+Purpose: Central WebSocket manager for the positioning server. Handles UWB device connections, message routing, position broadcasting, and live log event delivery to dashboard clients.
+
+Recent Changes:
+- Added dashboardClients: Set<WebSocket> to track browser dashboard connections separately from UWB devices
+- Added broadcastLog(level, event, detail?) public method: sends log_event messages to all open dashboard sockets
+- handleRegister: detects dashboard registration (device_type/deviceType === 'dashboard'), adds ws to dashboardClients, skips UWB device flow
+- handleDisconnect: checks dashboardClients first and removes ws; skips device teardown for dashboard sockets
+- Added broadcastLog calls at: device registration, device disconnect, ranging report received, position computed, heartbeat received
+
+Key Components:
+- broadcastLog(): Constructs LogEventMessage (ISO timestamp, level, event, optional detail) and sends to all dashboard clients
+- handleRegister(): Now bifurcates between dashboard clients and UWB devices via duck-typed check on device_type/deviceType
+- handleRanging(): Emits two log events - one for ranging measurement, one when position is computed
+- handleDisconnect(): Emits warn-level log event with device id before removing from maps
+
+Dependencies:
+- ../config/types: LogEventMessage, LogEventLevel (newly added types)
+- ../positioning/multilateration: positionEngine.computePosition()
+- ../positioning/ranging-buffer: rangingBuffer.addMeasurement()
+- ../config/anchor-config: anchorConfig.getAnchorList()
+
+Architecture Notes:
+- Dashboard clients are identified by a camelCase or snake_case device_type of 'dashboard' (sent by the frontend on ws.onopen)
+- dashboardClients set is separate from devices map; dashboard sockets never enter wsToDevice or devices maps
+- broadcastLog is public so it can be called from other server modules in future
+- Log events are push-only from server to dashboard; no client-side log messages are expected

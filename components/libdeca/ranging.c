@@ -24,7 +24,12 @@
 #include "ranging.h"
 
 #define TWR_DEBUG_CALCULATION 0
-#define TWR_MAX_RETRY		  3
+/* Disable libdeca's rapid-fire internal retries. On ESP32-S3/DW3110, tight
+ * TX-RX cycling causes the PLL to drop to IDLE_RC, so a quick retry usually
+ * hits the chip while it's still recovering (SPI CRC error, RX preamble
+ * timeout). The caller's outer poll loop already retries on the next cycle
+ * with a 100ms+ gap, which the PLL handles cleanly. */
+#define TWR_MAX_RETRY		  1
 #define TWR_RETRY_DELAY		  20  /* random with this maximum in ms */
 #define TWR_SPI_US_PER_BYTE	  2.3 /* TODO: measured with 8MHz DMA for 12 byte */
 
@@ -605,6 +610,9 @@ void twr_init(uint32_t processing_delay_us, bool send_report)
 	|| CONFIG_DECA_DEBUG_RX_STATUS || CONFIG_DECA_READ_RXDIAG
 	twr_pto += 3;
 #endif
+	/* Extra PTO margin for ESP32-S3 with WiFi: SPI bus contention and
+	 * FreeRTOS scheduling jitter can delay RX enable timing */
+	twr_pto += 5;
 
 	LOG_INF("delay %" PRIu32 " us RX delay %" PRIu32
 			" us PTO %d (%d us) rep %d",

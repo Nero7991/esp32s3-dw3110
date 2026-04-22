@@ -1,0 +1,22 @@
+File: types.ts
+Purpose: Shared TypeScript type definitions for all messages exchanged between the server, UWB devices, and the dashboard frontend.
+
+Recent Changes:
+- Added LogEventLevel type alias ('info' | 'warn' | 'error')
+- Added LogEventMessage interface: { type: 'log_event', timestamp: string (ISO 8601), level: LogEventLevel, event: string, detail?: string }
+- Updated OutgoingMessage union to include LogEventMessage
+
+Key Components:
+- IncomingMessage: union of RegisterMessage | RangingReport | HeartbeatMessage (from UWB devices and dashboard)
+- OutgoingMessage: union of AnchorListMessage | PositionMessage | RegisteredMessage | ErrorMessage | LogEventMessage
+- LogEventMessage: server-to-dashboard push message for the live log panel
+- DeviceInfo: persisted device state (id, type, mac, connectedAt, lastSeen)
+- RangingMeasurement: internal buffer entry for ranging data
+- TagPosition: computed result stored per tag
+
+Dependencies:
+- Used by websocket-server.ts, http-server.ts, positioning modules
+
+Architecture Notes:
+- All wire messages are discriminated unions on the 'type' string field
+- LogEventMessage timestamp is a server-side ISO string; client formats it to HH:MM:SS.mmm for display

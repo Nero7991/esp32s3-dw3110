@@ -1,0 +1,9 @@
+{
+  "passive_tags": [
+    {
+      "id": 100,
+      "mac": "0x0064",
+      "name": "Tag 100 (passive)"
+    }
+  ]
+}

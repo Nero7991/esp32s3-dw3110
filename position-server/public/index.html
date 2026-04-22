@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UWB Position Tracking</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      background: #f5f5f7;
+      color: #1d1d1f;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 24px;
+      background: rgba(255,255,255,0.8);
+      backdrop-filter: saturate(180%) blur(20px);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+      border-bottom: 0.5px solid rgba(0,0,0,0.12);
+      z-index: 10;
+      flex-shrink: 0;
+    }
+
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: #86868b;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #34c759;
+    }
+
+    .status-dot.disconnected { background: #ff453a; }
+
+    /* ── Log Toggle ── */
+    /* ── Rate Selector ── */
+    .rate-selector {
+      display: flex;
+      border: 0.5px solid rgba(0,0,0,0.12);
+      border-radius: 7px;
+      overflow: hidden;
+      background: #f5f5f7;
+    }
+
+    .rate-btn {
+      padding: 6px 14px;
+      border: none;
+      background: transparent;
+      font-size: 12px;
+      font-weight: 500;
+      color: #1d1d1f;
+      cursor: pointer;
+      transition: all 0.15s;
+      border-right: 0.5px solid rgba(0,0,0,0.08);
+    }
+
+    .rate-btn:last-child { border-right: none; }
+
+    .rate-btn:hover { background: #e8e8ed; }
+
+    .rate-btn.active {
+      background: #007aff;
+      color: #fff;
+    }
+
+    .log-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      background: #f5f5f7;
+      border: 0.5px solid rgba(0,0,0,0.12);
+      border-radius: 7px;
+      font-size: 13px;
+      font-weight: 500;
+      color: #1d1d1f;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .log-toggle:hover { background: #e8e8ed; }
+
+    .log-toggle.active {
+      background: #007aff;
+      border-color: #007aff;
+      color: #fff;
+    }
+
+    .log-badge {
+      display: inline-block;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 4px;
+      background: #ff453a;
+      border-radius: 8px;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 16px;
+      color: #fff;
+      text-align: center;
+    }
+
+    .log-toggle.active .log-badge {
+      background: rgba(255,255,255,0.3);
+    }
+
+    /* ── Main Layout ── */
+    .main-content {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 260px;
+      background: #fff;
+      border-right: 0.5px solid rgba(0,0,0,0.12);
+      overflow-y: auto;
+      flex-shrink: 0;
+      padding: 16px;
+    }
+
+    .sidebar-section + .sidebar-section {
+      margin-top: 20px;
+    }
+
+    .sidebar-section h3 {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #86868b;
+      margin-bottom: 10px;
+      padding-left: 2px;
+    }
+
+    .empty-state {
+      font-size: 12px;
+      color: #86868b;
+      padding: 8px 2px;
+    }
+
+    .device-card {
+      background: #f5f5f7;
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+    }
+
+    .device-header {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .device-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #34c759;
+      flex-shrink: 0;
+    }
+
+    .device-name {
+      font-size: 13px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .device-mac {
+      font-size: 10px;
+      color: #86868b;
+      font-family: "SF Mono", "Menlo", monospace;
+      margin-left: auto;
+    }
+
+    .coord-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 8px;
+    }
+
+    .coord-row label {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      font-size: 10px;
+      color: #86868b;
+      font-weight: 500;
+    }
+
+    .coord-row input {
+      width: 46px;
+      padding: 3px 5px;
+      border: 0.5px solid #d2d2d7;
+      border-radius: 5px;
+      font-size: 11px;
+      font-family: "SF Mono", "Menlo", monospace;
+      text-align: right;
+      background: #fff;
+      outline: none;
+    }
+
+    .coord-row input:focus {
+      border-color: #007aff;
+      box-shadow: 0 0 0 3px rgba(0,122,255,0.12);
+    }
+
+    .btn-set {
+      padding: 3px 10px;
+      background: #007aff;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-left: auto;
+      transition: background 0.12s;
+    }
+
+    .btn-set:hover { background: #0066d6; }
+    .btn-set:active { background: #004ea2; }
+
+    .btn-locate {
+      padding: 3px 8px;
+      background: transparent;
+      color: #86868b;
+      border: 0.5px solid #d2d2d7;
+      border-radius: 5px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.12s;
+    }
+
+    .btn-locate:hover { color: #1d1d1f; border-color: #86868b; }
+    .btn-locate:active { background: #e8e8ed; }
+
+    .btn-settings {
+      padding: 2px;
+      background: none;
+      border: none;
+      color: #86868b;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      transition: color 0.12s;
+    }
+
+    .btn-settings:hover { color: #1d1d1f; }
+
+    /* ── Settings Modal ── */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.3);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-overlay.open { display: flex; }
+
+    .modal {
+      background: #fff;
+      border-radius: 14px;
+      width: 320px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+      overflow: hidden;
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 20px 12px;
+      border-bottom: 0.5px solid rgba(0,0,0,0.08);
+    }
+
+    .modal-header h3 {
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .modal-close {
+      padding: 4px 8px;
+      background: none;
+      border: none;
+      font-size: 18px;
+      color: #86868b;
+      cursor: pointer;
+      line-height: 1;
+    }
+
+    .modal-close:hover { color: #1d1d1f; }
+
+    .modal-body {
+      padding: 16px 20px 20px;
+    }
+
+    .setting-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 0.5px solid rgba(0,0,0,0.06);
+    }
+
+    .setting-row:last-child { border-bottom: none; }
+
+    .setting-label {
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .setting-value {
+      font-size: 12px;
+      color: #86868b;
+      font-family: "SF Mono", "Menlo", monospace;
+    }
+
+    .setting-select {
+      padding: 5px 8px;
+      border: 0.5px solid #d2d2d7;
+      border-radius: 7px;
+      font-size: 13px;
+      background: #f5f5f7;
+      cursor: pointer;
+      outline: none;
+    }
+
+    .setting-select:focus {
+      border-color: #007aff;
+      box-shadow: 0 0 0 3px rgba(0,122,255,0.12);
+    }
+
+    .tag-info {
+      margin-top: 6px;
+    }
+
+    .tag-position {
+      font-family: "SF Mono", "Menlo", monospace;
+      font-size: 11px;
+      color: #1d1d1f;
+      margin-bottom: 4px;
+    }
+
+    .tag-distances {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .tag-distances span {
+      font-family: "SF Mono", "Menlo", monospace;
+      font-size: 10px;
+      color: #636366;
+      background: #e8e8ed;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    /* ── 3D Viewport ── */
+    .viewport {
+      flex: 1;
+      position: relative;
+      min-width: 0;
+    }
+
+    .viewport canvas {
+      display: block;
+    }
+
+    /* ── Log Panel ── */
+    .log-panel {
+      background: #fff;
+      border-top: 0.5px solid rgba(0,0,0,0.12);
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+
+    .log-panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 20px;
+      border-bottom: 0.5px solid rgba(0,0,0,0.08);
+    }
+
+    .log-panel-header h2 {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .log-clear {
+      padding: 3px 8px;
+      background: none;
+      border: 0.5px solid #d2d2d7;
+      border-radius: 5px;
+      font-size: 11px;
+      color: #86868b;
+      cursor: pointer;
+      transition: all 0.12s;
+    }
+
+    .log-clear:hover {
+      color: #1d1d1f;
+      border-color: #86868b;
+    }
+
+    .log-entries {
+      height: 200px;
+      overflow-y: auto;
+      padding: 4px 0;
+      font-family: "SF Mono", "Menlo", monospace;
+      font-size: 11px;
+    }
+
+    .log-entry {
+      display: grid;
+      grid-template-columns: 82px 36px 1fr;
+      gap: 10px;
+      padding: 3px 20px;
+      line-height: 1.6;
+    }
+
+    .log-entry:hover { background: #f5f5f7; }
+
+    .log-time {
+      color: #86868b;
+      white-space: nowrap;
+    }
+
+    .log-level {
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 9px;
+      letter-spacing: 0.04em;
+      align-self: center;
+    }
+
+    .log-level.info  { color: #007aff; }
+    .log-level.warn  { color: #ff9f0a; }
+    .log-level.error { color: #ff453a; }
+
+    .log-body { color: #1d1d1f; }
+
+    .log-detail {
+      color: #86868b;
+      margin-left: 6px;
+    }
+
+    .log-empty {
+      padding: 16px 20px;
+      color: #86868b;
+      font-size: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    }
+
+    @media (max-width: 768px) {
+      .sidebar { display: none; }
+    }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>UWB Position Tracking</h1>
+      <div class="header-right">
+        <div class="rate-selector" id="rate-selector">
+          <button class="rate-btn" data-rate="slow">Slow</button>
+          <button class="rate-btn active" data-rate="normal">Normal</button>
+          <button class="rate-btn" data-rate="fast">Fast</button>
+        </div>
+        <button class="log-toggle" id="log-toggle">
+          Log <span class="log-badge" id="log-badge" style="display:none">0</span>
+        </button>
+        <div class="status">
+          <div class="status-dot" id="ws-status"></div>
+          <span id="status-text">Connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="main-content">
+      <div class="sidebar">
+        <div class="sidebar-section">
+          <h3>Anchors</h3>
+          <div id="anchor-list">
+            <p class="empty-state">No anchors connected</p>
+          </div>
+        </div>
+        <div class="sidebar-section">
+          <h3>Tags</h3>
+          <div id="tag-list">
+            <p class="empty-state">No tags connected</p>
+          </div>
+        </div>
+        <div class="sidebar-section">
+          <h3>Passive Tags</h3>
+          <div id="passive-tag-list">
+            <p class="empty-state">No passive tags</p>
+          </div>
+          <div style="margin-top:8px;display:flex;gap:4px">
+            <button class="btn-set" id="btn-add-passive" style="flex:1">Add</button>
+            <button class="btn-locate" id="btn-toggle-polling">Start Polling</button>
+          </div>
+        </div>
+      </div>
+      <div class="viewport" id="viewport"></div>
+    </div>
+
+    <div class="log-panel" id="log-panel" style="display:none">
+      <div class="log-panel-header">
+        <h2>Live Log</h2>
+        <button class="log-clear" id="log-clear">Clear</button>
+      </div>
+      <div class="log-entries" id="log-entries">
+        <div class="log-empty" id="log-empty">No events yet.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="settings-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="settings-title">Device Settings</h3>
+        <button class="modal-close" id="settings-close">x</button>
+      </div>
+      <div class="modal-body" id="settings-body"></div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

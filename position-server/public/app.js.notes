@@ -1,0 +1,30 @@
+File: app.js
+Purpose: Frontend JavaScript for the UWB dashboard. Manages WebSocket connection to the server, canvas rendering, REST polling, and the live log panel.
+
+Recent Changes:
+- Added LOG_MAX = 200 constant (max log entries before oldest is trimmed)
+- Added logEntries[], logVisible, logUnread state variables
+- handleMessage: added 'log_event' case that calls appendLogEntry(msg)
+- toggleLog(): toggles logVisible, shows/hides #log-panel, toggles .active on button, clears unread count, scrolls to bottom; if opening panel for first time calls rebuildLogPanel() via scrollLogToBottom
+- clearLog(): resets logEntries array, clears DOM, resets unread badge
+- updateLogBadge(): shows/hides #log-badge with count when panel is closed
+- formatLogTime(isoString): formats ISO timestamp to HH:MM:SS.mmm using local time
+- appendLogEntry(msg): adds entry to logEntries[], trims to LOG_MAX, increments unread if panel hidden, otherwise creates DOM row and appends to #log-entries; auto-scrolls
+- scrollLogToBottom(): sets scrollTop = scrollHeight on #log-entries
+- rebuildLogPanel(): full DOM rebuild of log from logEntries[] - used when panel is opened after entries accumulated while hidden
+
+Key Components:
+- connectWebSocket(): registers as dashboard (deviceType: 'dashboard') on open
+- handleMessage(): dispatches position, anchor_list, log_event messages
+- appendLogEntry(): incremental DOM append with trim; skips DOM work if panel hidden
+- rebuildLogPanel(): batch render for deferred visibility case
+
+Dependencies:
+- index.html: #log-panel, #log-entries, #log-toggle, #log-badge, .log-entry, .log-time, .log-level, .log-body, .log-detail DOM elements
+- Server WebSocket at /ws: receives log_event, position messages
+
+Architecture Notes:
+- Log entries are stored in logEntries[] in memory (capped at LOG_MAX=200) regardless of panel visibility
+- DOM is only updated when the panel is open; opening the panel triggers rebuildLogPanel() to render buffered entries
+- Unread badge counts events received while panel is hidden; cleared on open
+- Each .log-entry row uses a 3-column CSS grid: 90px time | 40px level | 1fr body

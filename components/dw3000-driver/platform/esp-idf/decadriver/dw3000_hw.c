@@ -90,9 +90,10 @@ int dw3000_hw_init_interrupt(void)
 		return ESP_FAIL;
 	}
 
+	/* Pin UWB IRQ task to Core 1 to avoid WiFi interference on Core 0 */
 	BaseType_t err = xTaskCreatePinnedToCore(
 		dw3000_irq_task, "dw3000_irq", DW3000_IRQ_TASK_STACK_SIZE, NULL,
-		DW3000_IRQ_TASK_PRIO, &irq_task_hdl, 0);
+		DW3000_IRQ_TASK_PRIO, &irq_task_hdl, 1);
 	if (err != pdTRUE) {
 		LOG_ERR("Could not create IRQ task");
 		return ESP_FAIL;
