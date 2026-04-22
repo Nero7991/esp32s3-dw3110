@@ -46,4 +46,38 @@ double twr_distance_calculation_dtu(uint32_t poll_rx_ts, uint32_t resp_tx_ts,
 									uint32_t final_rx_ts, uint32_t Ra,
 									uint32_t Da);
 
+/*
+ * Multi-anchor asymmetric DS-TWR (DW3000 User Manual §12 Appendix 1, Fig 34).
+ *
+ * Tag broadcasts one POLL; each anchor responds in its assigned TDMA slot;
+ * tag broadcasts one FINAL carrying per-anchor RESP RX timestamps. Each
+ * anchor parses the FINAL, finds its own entry, computes distance using
+ * the asymmetric DS-TWR formula, and reports independently.
+ *
+ * This path is separate from the legacy per-pair twr_start() flow so the
+ * legacy flow remains available for anchor-initiated passive-tag polls.
+ */
+#define TWR_MSG_POLLM 0x25
+#define TWR_MSG_RESPM 0x26
+#define TWR_MSG_FINAM 0x27
+
+#define MAX_MULTI_ANCHORS 8
+
+typedef void (*twr_multi_done_cb_t)(uint16_t cnum, uint8_t received,
+									uint8_t expected);
+typedef void (*twr_multi_anchor_cb_t)(uint64_t tag_mac, uint16_t my_id,
+									  uint16_t dist_cm, uint16_t cnum);
+
+/** Initialize multi-anchor TWR timing parameters. Must be called after
+ * twr_init(). */
+void twr_multi_init(uint32_t base_delay_us, uint32_t slot_duration_us);
+/** Set this anchor's slot number. Default is device_id-1 applied by caller. */
+void twr_multi_set_slot(uint8_t slot);
+/** Register tag-side cycle-complete observer. */
+void twr_multi_set_tag_observer(twr_multi_done_cb_t cb);
+/** Register anchor-side per-distance observer. */
+void twr_multi_set_anchor_observer(twr_multi_anchor_cb_t cb);
+/** Start a multi-anchor cycle. anchor_count = expected number of responders. */
+bool twr_start_multi(uint8_t anchor_count);
+
 #endif

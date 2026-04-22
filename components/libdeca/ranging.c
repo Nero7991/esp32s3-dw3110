@@ -60,6 +60,38 @@ struct twr_msg_report {
 	uint16_t dist;
 } __attribute__((packed));
 
+/*
+ * Multi-anchor asymmetric DS-TWR messages (User Manual §12 Appendix 1 Fig 34).
+ * POLLM (tag broadcast) -> RESPM x N (TDMA slots) -> FINAM (tag broadcast with
+ * per-anchor {id, resp_rx_ts}). Each anchor parses FINAM, finds its entry,
+ * computes distance locally, reports over WiFi.
+ */
+struct twr_msg_poll_multi {
+	uint16_t cnum;
+	uint8_t anchor_count;
+	uint8_t reserved;
+} __attribute__((packed));
+
+struct twr_msg_resp_multi {
+	uint16_t cnum;
+	uint8_t slot_num;
+	uint8_t reserved;
+} __attribute__((packed));
+
+struct twr_final_entry {
+	uint16_t anchor_id;
+	uint32_t resp_rx_ts; // low-32 DTU on the tag's clock
+} __attribute__((packed));
+
+struct twr_msg_final_multi {
+	uint16_t cnum;
+	uint32_t poll_tx_ts;	// low-32 DTU on the tag's clock
+	uint32_t final_tx_ts;	// low-32 DTU on the tag's clock (+ antenna delay)
+	uint8_t entry_count;
+	uint8_t reserved;
+	struct twr_final_entry entries[]; // flexible array
+} __attribute__((packed));
+
 #ifndef __ZEPHYR__
 static const char* LOG_TAG = "TWR";
 #endif
@@ -80,10 +112,38 @@ static int retry = 0;
 static bool in_progress = false;
 static uint64_t last_poll_rx_ts;
 
+/* Multi-anchor protocol state */
+static uint64_t multi_base_delay_dtu;	// anchor: RESP TX delay from poll_rx_ts
+static uint64_t multi_slot_duration_dtu;// inter-slot spacing
+static uint8_t multi_slot = 0;			// this anchor's slot number
+static twr_multi_done_cb_t multi_tag_observer;
+static twr_multi_anchor_cb_t multi_anchor_observer;
+
+/* Tag-side multi state */
+struct multi_entry_slot {
+	uint16_t anchor_id;
+	uint32_t resp_rx_ts;	/* low-32 DTU sent in FINAM payload */
+	uint64_t resp_rx_full;	/* full 40-bit DTU for FINAL TX scheduling */
+	bool valid;
+};
+static struct multi_entry_slot multi_entries[MAX_MULTI_ANCHORS];
+static uint16_t multi_cnum = 0;
+static uint64_t multi_poll_tx_ts;
+static uint8_t multi_expected_count = 0;
+static uint8_t multi_received_count = 0;
+static bool multi_in_progress = false;
+
+/* Anchor-side multi state (captured on POLLM RX, consumed on FINAM RX) */
+static uint16_t multi_anchor_cnum = 0;
+static uint64_t multi_anchor_poll_rx_ts = 0;
+static uint64_t multi_anchor_resp_tx_ts = 0;
+
 static void twr_retry(void);
 static void twr_handle_timeout(uint32_t status);
 static void twr_handle_result(uint64_t src, uint64_t dst, uint16_t dist,
 							  uint16_t cnum, bool reported, bool initiator);
+static void twr_multi_finalize(void);
+static void twr_multi_timeout_handler(uint32_t status);
 
 static uint64_t twr_my_mac(uint64_t other_addr)
 {
@@ -481,6 +541,305 @@ static void twr_handle_ss_response(const struct rxbuf* rx, uint64_t src)
 	twr_handle_result(twr_my_mac(src), src, dist, twr_cnum, false, true);
 }
 
+/*
+ * Multi-anchor asymmetric DS-TWR
+ */
+
+/* TAG -> broadcast */
+static bool twr_send_poll_multi(uint8_t anchor_count)
+{
+	struct txbuf* tx = dwmac_txbuf_get();
+	if (tx == NULL)
+		return false;
+
+	struct twr_msg_poll_multi* msg = dwprot_prepare(
+		tx, sizeof(struct twr_msg_poll_multi), TWR_MSG_POLLM, 0xFFFF);
+	msg->cnum = multi_cnum;
+	msg->anchor_count = anchor_count;
+	msg->reserved = 0;
+
+	dwmac_tx_set_ranging(tx);
+	dwmac_tx_expect_response(tx, twr_rx_delay);
+	/* RX window sized just past the last expected slot so the timeout-
+	 * finalize path fires quickly (before TWR_MULTI_FINAL_DELAY_US expires).
+	 * BASE_DELAY_US (5000) + N * SLOT_DURATION_US (60) + RESP airtime (~40)
+	 * + margin (200). */
+	uint32_t rx_window_us
+		= 5000 + (uint32_t)anchor_count * 500 + 100;
+	dwmac_tx_set_rx_timeout(tx, (uint16_t)US_TO_UUS(rx_window_us));
+	dwmac_tx_expect_multiple_responses(tx);
+	dwmac_tx_set_timeout_handler(tx, twr_multi_timeout_handler);
+
+	bool res = dwmac_transmit(tx);
+	if (res) {
+		DBG_UWB("Sent POLLM cnum=%d N=%d", multi_cnum, anchor_count);
+		expected_msg = TWR_MSG_RESPM;
+	} else {
+		LOG_ERR("Failed to send POLLM");
+		multi_in_progress = false;
+		expected_msg = 0;
+	}
+	return res;
+}
+
+/* ANCHOR -> TAG (slot-scheduled delayed TX) */
+static bool twr_send_resp_multi(uint64_t tag, uint64_t poll_rx_ts,
+								uint16_t cnum, uint8_t slot_num)
+{
+	struct txbuf* tx = dwmac_txbuf_get();
+	if (tx == NULL)
+		return false;
+
+	uint64_t resp_tx_time = (poll_rx_ts + multi_base_delay_dtu
+							 + (uint64_t)slot_num * multi_slot_duration_dtu)
+							& DTU_DELAYEDTRX_MASK;
+
+	struct twr_msg_resp_multi* msg = dwprot_prepare(
+		tx, sizeof(struct twr_msg_resp_multi), TWR_MSG_RESPM, tag);
+	msg->cnum = cnum;
+	msg->slot_num = slot_num;
+	msg->reserved = 0;
+
+	dwmac_tx_set_ranging(tx);
+	dwmac_tx_set_txtime(tx, resp_tx_time);
+
+	multi_anchor_cnum = cnum;
+
+	bool res = dwmac_transmit(tx);
+	if (res) {
+		DBG_UWB("Sent RESPM slot=%d cnum=%d", slot_num, cnum);
+		expected_msg = TWR_MSG_FINAM;
+	} else {
+		LOG_ERR("Failed to send RESPM (slot %d)", slot_num);
+		expected_msg = 0;
+	}
+	return res;
+}
+
+/* TAG -> broadcast (delayed TX, carries per-anchor resp_rx_ts).
+ * Scheduled relative to the latest RESP RX timestamp (full 40-bit DTU,
+ * fresh from the chip's RX register). Sized to cover the worst-case
+ * IRQ→starttx latency on the ESP32-S3, which can hit ~7 ms when the
+ * RX-timeout-fire path is taken. 10 ms gives ~3 ms headroom. */
+#define TWR_MULTI_FINAL_DELAY_US 10000
+
+static bool twr_send_final_multi(void)
+{
+	struct txbuf* tx = dwmac_txbuf_get();
+	if (tx == NULL)
+		return false;
+
+	/* Find the latest valid resp_rx_ts (full 40-bit) — schedule FINAM
+	 * relative to this (matches the legacy DS-TWR convention in
+	 * twr_send_final). resp_rx is fresh from the chip's RX register, unlike
+	 * dw_get_systime() which returns a latched (stale) value until the
+	 * next SPI write. */
+	uint64_t latest_resp_full = 0;
+	bool have_any = false;
+	for (uint8_t i = 0; i < MAX_MULTI_ANCHORS; i++) {
+		if (multi_entries[i].valid) {
+			if (!have_any
+				|| multi_entries[i].resp_rx_full > latest_resp_full) {
+				latest_resp_full = multi_entries[i].resp_rx_full;
+				have_any = true;
+			}
+		}
+	}
+	if (!have_any) {
+		return false; /* no responses — caller will abort cycle */
+	}
+
+	uint64_t final_tx_time
+		= (latest_resp_full + (uint64_t)US_TO_DTU(TWR_MULTI_FINAL_DELAY_US))
+		  & DTU_DELAYEDTRX_MASK;
+	uint32_t final_tx_ts_low
+		= (uint32_t)((final_tx_time + DWPHY_ANTENNA_DELAY) & 0xFFFFFFFFULL);
+
+	/* Reserve worst-case payload, then trim once we know entry_count. */
+	size_t max_payload = sizeof(struct twr_msg_final_multi)
+						 + (size_t)MAX_MULTI_ANCHORS
+							   * sizeof(struct twr_final_entry);
+	struct twr_msg_final_multi* msg
+		= dwprot_prepare(tx, max_payload, TWR_MSG_FINAM, 0xFFFF);
+	msg->cnum = multi_cnum;
+	msg->poll_tx_ts = (uint32_t)(multi_poll_tx_ts & 0xFFFFFFFFULL);
+	msg->final_tx_ts = final_tx_ts_low;
+
+	uint8_t n = 0;
+	for (uint8_t i = 0; i < MAX_MULTI_ANCHORS; i++) {
+		if (multi_entries[i].valid) {
+			msg->entries[n].anchor_id = multi_entries[i].anchor_id;
+			msg->entries[n].resp_rx_ts = multi_entries[i].resp_rx_ts;
+			n++;
+		}
+	}
+	msg->entry_count = n;
+	msg->reserved = 0;
+
+	/* Trim TX length to actual used bytes. */
+	tx->len = DWMAC_PROTO_SHORT_LEN + sizeof(struct twr_msg_final_multi)
+			  + (size_t)n * sizeof(struct twr_final_entry);
+
+	dwmac_tx_set_ranging(tx);
+	dwmac_tx_set_txtime(tx, final_tx_time);
+
+	bool res = dwmac_transmit(tx);
+	if (res) {
+		DBG_UWB("Sent FINAM cnum=%d entries=%d", multi_cnum, n);
+	} else {
+		LOG_ERR("Failed to send FINAM");
+	}
+	expected_msg = 0;
+	return res;
+}
+
+static void twr_multi_finalize(void)
+{
+	if (!multi_in_progress) {
+		return;
+	}
+
+	uint8_t received = multi_received_count;
+	uint8_t expected = multi_expected_count;
+
+	/* multi_poll_tx_ts was captured on the first RESPM RX (before any TX
+	 * that would overwrite the TX timestamp register). */
+	if (received > 0) {
+		(void)twr_send_final_multi();
+	}
+
+	multi_in_progress = false;
+	expected_msg = 0;
+
+	if (multi_tag_observer) {
+		multi_tag_observer(multi_cnum, received, expected);
+	}
+}
+
+static void twr_multi_timeout_handler(uint32_t status)
+{
+	(void)status;
+	/* RX window closed — some or all slots may be empty. Finalize with
+	 * whatever we have. */
+	twr_multi_finalize();
+}
+
+/* TAG: receives a RESPM from an anchor */
+static void twr_handle_resp_multi(const struct rxbuf* rx, uint64_t src)
+{
+	if (!multi_in_progress) {
+		return;
+	}
+	const struct twr_msg_resp_multi* msg = dwprot_get_payload(rx->buf);
+	if (msg->cnum != multi_cnum) {
+		return;
+	}
+	if (msg->slot_num >= MAX_MULTI_ANCHORS) {
+		return;
+	}
+
+	/* Capture POLLM's TX timestamp on the first RESPM of this cycle,
+	 * while the TX register still reflects POLLM (no TX has happened
+	 * since). Doing this lazily from the RX handler is more reliable than
+	 * from a TX-done IRQ, which may fire before the chip latches the TX
+	 * timestamp register. */
+	if (multi_received_count == 0) {
+		multi_poll_tx_ts = dw_get_tx_timestamp();
+	}
+
+	if (multi_entries[msg->slot_num].valid) {
+		return; /* dedup */
+	}
+	multi_entries[msg->slot_num].anchor_id = (uint16_t)src;
+	multi_entries[msg->slot_num].resp_rx_ts = (uint32_t)rx->ts;
+	multi_entries[msg->slot_num].resp_rx_full = rx->ts;
+	multi_entries[msg->slot_num].valid = true;
+	multi_received_count++;
+
+	/* Early-finalize when all expected anchors heard. Otherwise let the
+	 * tag's RX timeout fire and finalize from the timeout handler. The
+	 * RX window is sized just past the last expected slot. */
+	if (multi_received_count >= multi_expected_count) {
+		dwt_forcetrxoff();
+		twr_multi_finalize();
+	}
+}
+
+/* ANCHOR: receives a POLLM */
+static void twr_handle_poll_multi(const struct rxbuf* rx, uint64_t src)
+{
+	const struct twr_msg_poll_multi* msg = dwprot_get_payload(rx->buf);
+	multi_anchor_poll_rx_ts = rx->ts;
+	multi_anchor_cnum = msg->cnum;
+
+	if (multi_slot >= msg->anchor_count) {
+		/* Not expected this cycle; still wait for FINAM to stay aligned. */
+		expected_msg = TWR_MSG_FINAM;
+		return;
+	}
+
+	(void)twr_send_resp_multi(src, rx->ts, msg->cnum, multi_slot);
+}
+
+/* ANCHOR: receives the FINAM, computes distance, fires observer */
+static void twr_handle_final_multi(const struct rxbuf* rx, uint64_t src)
+{
+	const struct twr_msg_final_multi* msg = dwprot_get_payload(rx->buf);
+	/* Validate length covers header + entries. */
+	size_t payload_len = dwprot_get_payload_len(rx->buf, rx->len);
+	if (payload_len < sizeof(struct twr_msg_final_multi)) {
+		return;
+	}
+	size_t expected_len = sizeof(struct twr_msg_final_multi)
+						  + (size_t)msg->entry_count
+								* sizeof(struct twr_final_entry);
+	if (payload_len != expected_len) {
+		LOG_ERR("FINAM length mismatch: got %u expected %u",
+				(unsigned)payload_len, (unsigned)expected_len);
+		return;
+	}
+
+	if (msg->cnum != multi_anchor_cnum) {
+		/* FINAM from a different cycle than our cached POLLM state. */
+		expected_msg = 0;
+		return;
+	}
+
+	/* Read RESPM's TX timestamp from hardware (still latched since no TX
+	 * happened between RESPM and now). Includes antenna delay, matching the
+	 * legacy twr_handle_final's handling. */
+	multi_anchor_resp_tx_ts = dwt_readtxtimestamplo32();
+
+	/* Find our entry by anchor_id == dwmac_get_mac16(). */
+	uint16_t my_id = dwmac_get_mac16();
+	const struct twr_final_entry* found = NULL;
+	for (uint8_t i = 0; i < msg->entry_count; i++) {
+		if (msg->entries[i].anchor_id == my_id) {
+			found = &msg->entries[i];
+			break;
+		}
+	}
+	expected_msg = 0;
+	if (found == NULL) {
+		return; /* tag didn't hear us this cycle */
+	}
+
+	/* Asymmetric DS-TWR using the legacy helper. */
+	uint32_t Tround_T = found->resp_rx_ts - msg->poll_tx_ts;
+	uint32_t Treply_T = msg->final_tx_ts - found->resp_rx_ts;
+
+	int dist = twr_distance_calculation((uint32_t)multi_anchor_poll_rx_ts,
+										(uint32_t)multi_anchor_resp_tx_ts,
+										(uint32_t)rx->ts,
+										Tround_T, Treply_T);
+
+	uint16_t dist_cm = twr_fixup_distance(dist);
+
+	if (multi_anchor_observer) {
+		multi_anchor_observer(src, my_id, dist_cm, msg->cnum);
+	}
+}
+
 static size_t twr_get_msg_len(uint8_t func)
 {
 	switch (func) {
@@ -496,6 +855,15 @@ static size_t twr_get_msg_len(uint8_t func)
 		return 0;
 	case TWR_MSG_SSRESP:
 		return sizeof(struct twr_msg_ss_resp);
+	case TWR_MSG_POLLM:
+		return sizeof(struct twr_msg_poll_multi);
+	case TWR_MSG_RESPM:
+		return sizeof(struct twr_msg_resp_multi);
+	case TWR_MSG_FINAM:
+		/* Variable length — checked at call site in handler. Return 0
+		 * here so the generic length check in twr_handle_message is
+		 * skipped; FINAM's handler does its own validation. */
+		return 0;
 	}
 	return 0;
 }
@@ -505,15 +873,18 @@ void twr_handle_message(const struct rxbuf* rx)
 	uint64_t src = dwprot_get_src(rx->buf);
 	uint8_t func = dwprot_get_func(rx->buf);
 
-	/* drop unexpected messages, but always allow POLL in case the sender needs
-	 * to retry */
-	if (expected_msg != 0 && func != expected_msg && func != TWR_MSG_POLL) {
+	/* drop unexpected messages, but always allow POLL / POLLM in case the
+	 * sender needs to retry or a new cycle starts */
+	if (expected_msg != 0 && func != expected_msg && func != TWR_MSG_POLL
+		&& func != TWR_MSG_POLLM) {
 		LOG_ERR("Drop unexpected MSG %X from " LADDR_FMT, func, LADDR_PAR(src));
 		return;
 	}
 
-	/* check length */
-	if (dwprot_get_payload_len(rx->buf, rx->len) != twr_get_msg_len(func)) {
+	/* check length — FINAM is variable-length so skip the generic check and
+	 * let its handler validate against entry_count. */
+	if (func != TWR_MSG_FINAM
+		&& dwprot_get_payload_len(rx->buf, rx->len) != twr_get_msg_len(func)) {
 		LOG_ERR("Drop invalid length MSG %X from " LADDR_FMT, func,
 				LADDR_PAR(src));
 		return;
@@ -537,6 +908,15 @@ void twr_handle_message(const struct rxbuf* rx)
 		break;
 	case TWR_MSG_SSRESP:
 		twr_handle_ss_response(rx, src);
+		break;
+	case TWR_MSG_POLLM:
+		twr_handle_poll_multi(rx, src);
+		break;
+	case TWR_MSG_RESPM:
+		twr_handle_resp_multi(rx, src);
+		break;
+	case TWR_MSG_FINAM:
+		twr_handle_final_multi(rx, src);
 		break;
 	default:
 		LOG_ERR("Unknown MSG %X from " LADDR_FMT, func, LADDR_PAR(src));
@@ -690,4 +1070,69 @@ uint64_t twr_get_source_mac(void)
 	} else {
 		return dwmac_get_mac64();
 	}
+}
+
+/*
+ * Multi-anchor public API
+ */
+
+void twr_multi_init(uint32_t base_delay_us, uint32_t slot_duration_us)
+{
+	multi_base_delay_dtu
+		= (uint64_t)US_TO_DTU(base_delay_us) & DTU_DELAYEDTRX_MASK;
+	multi_slot_duration_dtu = (uint64_t)US_TO_DTU(slot_duration_us);
+	for (uint8_t i = 0; i < MAX_MULTI_ANCHORS; i++) {
+		multi_entries[i].valid = false;
+	}
+	LOG_INF("TWR multi init: base=%lu us (%llu DTU) slot=%lu us (%llu DTU)",
+			(unsigned long)base_delay_us,
+			(unsigned long long)multi_base_delay_dtu,
+			(unsigned long)slot_duration_us,
+			(unsigned long long)multi_slot_duration_dtu);
+}
+
+void twr_multi_set_slot(uint8_t slot)
+{
+	if (slot >= MAX_MULTI_ANCHORS) {
+		LOG_ERR("Invalid slot %u (max %d)", slot, MAX_MULTI_ANCHORS - 1);
+		return;
+	}
+	multi_slot = slot;
+	LOG_INF("TWR multi slot = %u", slot);
+}
+
+void twr_multi_set_tag_observer(twr_multi_done_cb_t cb)
+{
+	multi_tag_observer = cb;
+}
+
+void twr_multi_set_anchor_observer(twr_multi_anchor_cb_t cb)
+{
+	multi_anchor_observer = cb;
+}
+
+bool twr_start_multi(uint8_t anchor_count)
+{
+	if (!dwhw_is_ready()) {
+		LOG_ERR("Not ready");
+		return false;
+	}
+	if (anchor_count == 0 || anchor_count > MAX_MULTI_ANCHORS) {
+		LOG_ERR("Invalid anchor_count %u", anchor_count);
+		return false;
+	}
+	if (multi_in_progress) {
+		/* Previous cycle still open — force close and continue. */
+		twr_multi_finalize();
+	}
+
+	multi_cnum++;
+	multi_expected_count = anchor_count;
+	multi_received_count = 0;
+	for (uint8_t i = 0; i < MAX_MULTI_ANCHORS; i++) {
+		multi_entries[i].valid = false;
+	}
+	multi_in_progress = true;
+
+	return twr_send_poll_multi(anchor_count);
 }

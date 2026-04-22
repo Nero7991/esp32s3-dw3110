@@ -83,9 +83,14 @@ static void diag_task(void* arg)
     vTaskDelete(NULL);
 }
 
-/* Unified TWR observer - handles both active tag responses and passive tag poll results */
+/* Legacy TWR observer - retained ONLY for the passive-tag poll path, where
+ * this anchor acts as the initiator. Active-tag rangings now flow through
+ * the multi-anchor path and anchor_multi_result_cb below. */
 static void anchor_twr_done_cb(uint64_t src, uint64_t dst, uint16_t dist, uint16_t num)
 {
+    (void)dst;
+    (void)num;
+
     if (s_polling_passive) {
         /* Result from our active poll to a passive tag */
         s_poll_distance = dist;
@@ -95,24 +100,32 @@ static void anchor_twr_done_cb(uint64_t src, uint64_t dst, uint16_t dist, uint16
         }
         return;
     }
+    /* Ignored in multi-anchor mode. */
+}
 
-    /* Normal responder result - active tag polled us */
+/* Multi-anchor responder callback: fires once per FINAM we successfully
+ * decoded, with our locally-computed distance. */
+static void anchor_multi_result_cb(uint64_t tag_mac, uint16_t my_id,
+                                   uint16_t dist_cm, uint16_t cnum)
+{
+    (void)my_id;
+    (void)cnum;
+
     const device_config_t* config = device_config_get();
 
-    ESP_LOGI(TAG, "TWR: tag=0x%04X dist=%d cm seq=%" PRIu32,
-             (uint16_t)src, dist, s_seq_num);
+    ESP_LOGI(TAG, "TWR-M: tag=0x%04X dist=%d cm seq=%" PRIu32,
+             (uint16_t)tag_mac, dist_cm, s_seq_num);
 
     s_ranging_count++;
 
     if (ws_client_is_ready()) {
         ranging_report_t report = {
             .anchor_id = config->device_id,
-            .tag_id = (uint16_t)src,
-            .distance_cm = dist,
+            .tag_id = (uint16_t)tag_mac,
+            .distance_cm = dist_cm,
             .seq = s_seq_num++,
             .timestamp_ms = esp_timer_get_time() / 1000
         };
-        ESP_LOGI(TAG, "WS: Sending ranging report to server");
         ws_client_send_ranging(&report);
     } else {
         ESP_LOGW(TAG, "WS: Not ready (state=%d), dropping ranging report",
@@ -272,13 +285,21 @@ esp_err_t anchor_mode_init(void)
     }
     dwmac_set_frame_filter();
 
-    /* Initialize TWR as responder */
+    /* Initialize TWR as responder.
+     * Legacy (twr_start) observer is kept for the passive-tag poll path. */
     ESP_LOGI(TAG, "TWR init (responder)");
     twr_init(TWR_PROCESSING_DELAY, true);
     twr_set_observer(anchor_twr_done_cb);
 
+    /* Multi-anchor asymmetric DS-TWR: slot = device_id - 1. Timing must
+     * match what the tag configures (5000 us base, 60 us per slot). */
+    uint8_t slot = (config->device_id > 0) ? (uint8_t)(config->device_id - 1) : 0;
+    twr_multi_init(5000 /* base delay us */, 500 /* slot duration us */);
+    twr_multi_set_slot(slot);
+    twr_multi_set_anchor_observer(anchor_multi_result_cb);
+
     s_initialized = true;
-    ESP_LOGI(TAG, "Anchor mode initialized");
+    ESP_LOGI(TAG, "Anchor mode initialized (multi-anchor slot=%u)", slot);
     return ESP_OK;
 }
 

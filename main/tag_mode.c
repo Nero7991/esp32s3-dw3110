@@ -30,123 +30,93 @@
 
 static const char* TAG = "TAG";
 
-/* Default polling interval per anchor in ms */
-#define DEFAULT_POLL_INTERVAL_MS 500
+/* Cycle period in ms (time between start of successive multi-anchor cycles).
+ * 66 ms ≈ 15 Hz target for drone control. The inner cycle itself takes
+ * ~5 ms on-air + tag processing, so this is the pacing delay. */
+#define DEFAULT_CYCLE_PERIOD_MS 66
 
-/* TWR timeout in ms — covers full exchange + up to 3 libdeca retries, each
- * with a random 0–20ms backoff. 150ms is comfortable headroom. */
-#define TWR_TIMEOUT_MS 150
+/* Multi-anchor cycle wait timeout. The libdeca path uses an internal
+ * 6 ms RX window. 50 ms is safely above that under any scheduling jitter. */
+#define CYCLE_TIMEOUT_MS 50
 
 /* State */
 static bool s_initialized = false;
 static bool s_running = false;
 static TaskHandle_t s_poll_task = NULL;
 static uint32_t s_cycle_count = 0;
-static uint32_t s_seq_num = 0;
-static uint32_t s_poll_interval_ms = DEFAULT_POLL_INTERVAL_MS;
+static uint32_t s_cycle_period_ms = DEFAULT_CYCLE_PERIOD_MS;
 
 /* Anchor list */
 static anchor_info_t s_anchors[MAX_ANCHORS];
 static uint8_t s_anchor_count = 0;
 static SemaphoreHandle_t s_anchor_mutex = NULL;
 
-/* Current TWR state */
-static volatile bool s_twr_complete = false;
-static volatile uint16_t s_last_distance = 0;
-static volatile uint16_t s_last_anchor_id = 0;
-static SemaphoreHandle_t s_twr_sem = NULL;
+/* Last cycle outcome */
+static SemaphoreHandle_t s_cycle_sem = NULL;
+static volatile uint8_t s_last_received = 0;
+static volatile uint8_t s_last_expected = 0;
 
-/* Callback when TWR completes */
-static void tag_twr_done_cb(uint64_t src, uint64_t dst, uint16_t dist, uint16_t num)
+/* Multi-anchor cycle-complete observer (fires from dwmac task context). */
+static void tag_multi_done_cb(uint16_t cnum, uint8_t received, uint8_t expected)
 {
-    s_last_distance = dist;
-    s_last_anchor_id = (uint16_t)dst;
-    s_twr_complete = true;
-
-    /* Signal TWR completion */
-    if (s_twr_sem) {
-        xSemaphoreGive(s_twr_sem);
+    (void)cnum;
+    s_last_received = received;
+    s_last_expected = expected;
+    if (s_cycle_sem) {
+        xSemaphoreGive(s_cycle_sem);
     }
-
-    ESP_LOGD(TAG, "TWR done: anchor=0x%04X dist=%d cm", (uint16_t)dst, dist);
 }
 
 static void tag_timeout_handler(uint32_t status)
 {
-    /* Do NOT signal the semaphore here — libdeca fires this on every
-     * intermediate RX timeout during its internal retry loop. Final
-     * success/failure comes through tag_twr_done_cb (with dist=FAILED
-     * only after all retries are exhausted). */
-    ESP_LOGD(TAG, "TWR timeout: 0x%08lX", status);
+    /* No-op for the multi path — libdeca fires the multi observer on its
+     * own RX timeout. We keep this to satisfy the dwmac_init signature and
+     * for any legacy twr_start() calls (none in tag mode currently). */
+    (void)status;
 }
 
 static void tag_error_handler(uint32_t status)
 {
-    /* Same rationale as tag_timeout_handler: recoverable via libdeca retries. */
-    ESP_LOGD(TAG, "TWR error: 0x%08lX", status);
+    (void)status;
 }
 
-/* Poll a single anchor and report result */
-static bool poll_anchor(uint16_t anchor_mac)
+/* One multi-anchor cycle. Returns the number of RESPs received. */
+static uint8_t run_multi_cycle(uint8_t anchor_count)
 {
-    const device_config_t* config = device_config_get();
-
-    s_twr_complete = false;
-    s_last_distance = TWR_FAILED_VALUE;
-
-    ESP_LOGI(TAG, "Polling anchor 0x%04X...", anchor_mac);
-
-    /* Full radio state reset + PLL re-lock before each poll.
+    /* Full radio state reset + PLL re-lock before each cycle.
      *
      * Per the DW3000 User Manual §9.4 (p.240) + §10.4 (p.245): after a
      * failed delayed-TX (HPDWARN-style silent failure), the chip may have
      * fallen to IDLE_RC. dwt_setdwstate(DWT_DW_IDLE) from IDLE_RC re-runs
-     * PLL calibration and waits for CPLOCK. We explicitly route through
-     * IDLE_RC first so the re-cal actually fires. */
+     * PLL calibration and waits for CPLOCK. Routing through IDLE_RC first
+     * guarantees the re-cal actually fires. */
     dwt_forcetrxoff();
     dwt_setdwstate(DWT_DW_IDLE_RC);
     dwt_setdwstate(DWT_DW_IDLE);
 
-    /* Start DS-TWR to anchor */
-    if (!twr_start(anchor_mac)) {
-        ESP_LOGW(TAG, "Failed to start TWR to 0x%04X", anchor_mac);
-        return false;
+    /* Drain any stale signal from a previous cycle. */
+    xSemaphoreTake(s_cycle_sem, 0);
+    s_last_received = 0;
+    s_last_expected = anchor_count;
+
+    if (!twr_start_multi(anchor_count)) {
+        ESP_LOGW(TAG, "Failed to start multi cycle");
+        return 0;
     }
 
-    ESP_LOGD(TAG, "TWR started, waiting for response...");
-
-    /* Wait for TWR completion with timeout */
-    if (xSemaphoreTake(s_twr_sem, pdMS_TO_TICKS(TWR_TIMEOUT_MS)) != pdTRUE) {
-        ESP_LOGW(TAG, "TWR timeout waiting for 0x%04X", anchor_mac);
-        twr_cancel();
-        return false;
+    if (xSemaphoreTake(s_cycle_sem, pdMS_TO_TICKS(CYCLE_TIMEOUT_MS))
+        != pdTRUE) {
+        ESP_LOGW(TAG, "Multi cycle timed out (>%d ms)", CYCLE_TIMEOUT_MS);
+        return 0;
     }
 
-    /* Check result */
-    if (s_last_distance == TWR_FAILED_VALUE) {
-        ESP_LOGD(TAG, "TWR failed to 0x%04X", anchor_mac);
-        return false;
-    }
-
-    /* Send ranging report via WebSocket */
-    if (ws_client_is_ready()) {
-        ranging_report_t report = {
-            .anchor_id = anchor_mac,
-            .tag_id = config->device_id,
-            .distance_cm = s_last_distance,
-            .seq = s_seq_num++,
-            .timestamp_ms = esp_timer_get_time() / 1000
-        };
-        ws_client_send_ranging(&report);
-    }
-
-    ESP_LOGI(TAG, "Anchor 0x%04X: %d cm", anchor_mac, s_last_distance);
-    return true;
+    return s_last_received;
 }
 
-/* Polling task - cycles through all anchors */
+/* Polling task - runs one multi-anchor cycle per period. */
 static void poll_task(void* arg)
 {
+    (void)arg;
     ESP_LOGI(TAG, "Polling task started");
 
     while (s_running) {
@@ -157,32 +127,34 @@ static void poll_task(void* arg)
             continue;
         }
 
-        /* Poll each anchor */
         xSemaphoreTake(s_anchor_mutex, portMAX_DELAY);
         uint8_t count = s_anchor_count;
-        anchor_info_t anchors[MAX_ANCHORS];
-        memcpy(anchors, s_anchors, sizeof(anchor_info_t) * count);
         xSemaphoreGive(s_anchor_mutex);
 
-        uint8_t success_count = 0;
-        for (uint8_t i = 0; i < count && s_running; i++) {
-            if (anchors[i].active) {
-                if (poll_anchor(anchors[i].mac)) {
-                    success_count++;
-                }
-                vTaskDelay(pdMS_TO_TICKS(s_poll_interval_ms));
-            }
+        if (count > MAX_MULTI_ANCHORS) {
+            count = MAX_MULTI_ANCHORS;
         }
+
+        uint32_t t_start = esp_timer_get_time() / 1000;
+        uint8_t received = run_multi_cycle(count);
+        uint32_t elapsed = (esp_timer_get_time() / 1000) - t_start;
 
         s_cycle_count++;
 
-        /* Log every 10 cycles */
-        if (s_cycle_count % 10 == 0) {
+        /* Log every 15 cycles (≈1 s at 15 Hz). */
+        if (s_cycle_count % 15 == 0) {
             dwt_deviceentcnts_t counters;
             dwt_readeventcounters(&counters);
-            ESP_LOGI(TAG, "Cycle %" PRIu32 ": %d/%d anchors OK, TXF=%u CRCG=%u",
-                     s_cycle_count, success_count, count,
-                     counters.TXF, counters.CRCG);
+            ESP_LOGI(TAG,
+                     "Cycle %" PRIu32 ": %u/%u anchors OK (%lu ms), "
+                     "TXF=%u CRCG=%u",
+                     s_cycle_count, received, count,
+                     (unsigned long)elapsed, counters.TXF, counters.CRCG);
+        }
+
+        /* Pace to cycle period. */
+        if (elapsed < s_cycle_period_ms) {
+            vTaskDelay(pdMS_TO_TICKS(s_cycle_period_ms - elapsed));
         }
     }
 
@@ -201,9 +173,9 @@ esp_err_t tag_mode_init(void)
     ESP_LOGI(TAG, "Initializing tag mode (ID: 0x%04X)", config->device_id);
 
     /* Create semaphores */
-    s_twr_sem = xSemaphoreCreateBinary();
+    s_cycle_sem = xSemaphoreCreateBinary();
     s_anchor_mutex = xSemaphoreCreateMutex();
-    if (!s_twr_sem || !s_anchor_mutex) {
+    if (!s_cycle_sem || !s_anchor_mutex) {
         ESP_LOGE(TAG, "Failed to create semaphores");
         return ESP_ERR_NO_MEM;
     }
@@ -245,10 +217,14 @@ esp_err_t tag_mode_init(void)
     }
     dwmac_set_frame_filter();
 
-    /* Initialize TWR as initiator */
-    ESP_LOGI(TAG, "TWR init (initiator)");
-    twr_init(TWR_PROCESSING_DELAY, true);
-    twr_set_observer(tag_twr_done_cb);
+    /* Initialize TWR as initiator.
+     * send_report=false: the legacy single-pair path is not used in tag mode;
+     * the multi-anchor path doesn't have a REPORT phase — anchors report
+     * distances to the server over WiFi. */
+    ESP_LOGI(TAG, "TWR init (initiator, multi-anchor)");
+    twr_init(TWR_PROCESSING_DELAY, false);
+    twr_multi_init(5000 /* base delay us */, 500 /* slot duration us */);
+    twr_multi_set_tag_observer(tag_multi_done_cb);
 
     s_initialized = true;
     ESP_LOGI(TAG, "Tag mode initialized");
@@ -272,7 +248,6 @@ esp_err_t tag_mode_start(void)
 
     s_running = true;
     s_cycle_count = 0;
-    s_seq_num = 0;
 
     /* Create polling task on Core 1 (same as UWB IRQ) to avoid WiFi interference */
     BaseType_t ret = xTaskCreatePinnedToCore(poll_task, "tag_poll", 4096, NULL, 10, &s_poll_task, 1);
@@ -343,10 +318,12 @@ uint32_t tag_mode_get_cycle_count(void)
 
 void tag_mode_set_poll_interval(uint32_t interval_ms)
 {
-    /* Minimum 5ms to avoid starving the radio and other tasks */
-    if (interval_ms < 5) {
-        interval_ms = 5;
+    /* Reinterpreted as CYCLE PERIOD (time between successive multi-anchor
+     * cycles). Minimum 20 ms to avoid starving the radio and other tasks;
+     * 66 ms = 15 Hz target. */
+    if (interval_ms < 20) {
+        interval_ms = 20;
     }
-    s_poll_interval_ms = interval_ms;
-    ESP_LOGI(TAG, "Poll interval set to %" PRIu32 " ms", interval_ms);
+    s_cycle_period_ms = interval_ms;
+    ESP_LOGI(TAG, "Cycle period set to %" PRIu32 " ms", interval_ms);
 }
