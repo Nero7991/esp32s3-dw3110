@@ -72,11 +72,14 @@ static void tag_error_handler(uint32_t status)
     (void)status;
 }
 
-/* Diagnostics task: log responder activity counters periodically. */
+/* Diagnostics + auto-recovery task: log responder activity periodically
+ * and kick the RX if it has stalled (chip occasionally drops out of
+ * continuous-RX mode after long uptime). */
 static void diag_task(void* arg)
 {
     (void)arg;
     uint32_t prev_count = 0;
+    uint32_t consecutive_idle = 0;
     while (s_running) {
         vTaskDelay(pdMS_TO_TICKS(5000));
         if (!s_running) break;
@@ -84,13 +87,32 @@ static void diag_task(void* arg)
         dwt_deviceentcnts_t counters;
         dwt_readeventcounters(&counters);
         uint32_t cur = s_responder_count;
+        uint32_t delta = cur - prev_count;
         ESP_LOGI(TAG,
                  "Responder: %lu polls (last 5s: %lu) last anchor=0x%04X "
                  "dist=%u cm | CRCG=%u TXF=%u",
-                 (unsigned long)cur, (unsigned long)(cur - prev_count),
+                 (unsigned long)cur, (unsigned long)delta,
                  s_last_anchor_id, s_last_distance,
                  counters.CRCG, counters.TXF);
         prev_count = cur;
+
+        /* If we've been idle for two intervals (10 s), kick the radio.
+         * Drop continuous RX, force trx off, re-arm. */
+        if (delta == 0) {
+            consecutive_idle++;
+            if (consecutive_idle >= 2) {
+                ESP_LOGW(TAG, "RX stalled, kicking radio");
+                dwmac_set_rx_reenable(false);
+                dwt_forcetrxoff();
+                dwt_setdwstate(DWT_DW_IDLE_RC);
+                dwt_setdwstate(DWT_DW_IDLE);
+                dwmac_set_rx_reenable(true);
+                dwt_rxenable(DWT_START_RX_IMMEDIATE);
+                consecutive_idle = 0;
+            }
+        } else {
+            consecutive_idle = 0;
+        }
     }
     vTaskDelete(NULL);
 }
