@@ -397,6 +397,7 @@ function handleRangingUpdate(msg) {
     if (d) d.distanceCm = msg.distanceCm;
   }
   updateTagSidebar(msg.tagId);
+  updatePassiveTagDistances(msg.tagId);
 }
 
 function handlePosition(msg) {
@@ -712,7 +713,12 @@ function renderPassiveTagsSidebar() {
   for (const tag of passiveTags) {
     const card = document.createElement('div');
     card.className = 'device-card';
+    card.id = `passive-card-${tag.id}`;
     const hex = '#ff453a';
+    /* Pull live distances from the same tags map used by the active list,
+     * keyed on the same device id. */
+    const liveTag = tags.get(tag.id);
+    const distHtml = renderPassiveDistances(liveTag);
     card.innerHTML = `
       <div class="device-header">
         <span class="device-dot" style="background:${hex}"></span>
@@ -720,6 +726,7 @@ function renderPassiveTagsSidebar() {
         <button class="btn-locate" data-id="${tag.id}" style="color:#ff453a;border-color:#ff453a">Remove</button>
         <span class="device-mac">0x${tag.mac.toString(16).padStart(4, '0')}</span>
       </div>
+      <div class="tag-info" id="passive-info-${tag.id}">${distHtml}</div>
     `;
     card.querySelector('.btn-locate').addEventListener('click', () => {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -728,6 +735,27 @@ function renderPassiveTagsSidebar() {
     });
     container.appendChild(card);
   }
+}
+
+function renderPassiveDistances(liveTag) {
+  if (!liveTag || !liveTag.distances || liveTag.distances.size === 0) {
+    return '<span class="empty-state">Waiting for data...</span>';
+  }
+  let html = '<div class="tag-distances">';
+  for (const [aid, d] of liveTag.distances) {
+    const a = anchors.get(aid);
+    const name = a ? `A${aid}` : `A${aid}`;
+    html += `<span>${name}: ${(d.distanceCm / 100).toFixed(2)}m</span>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+function updatePassiveTagDistances(tagId) {
+  const el = document.getElementById(`passive-info-${tagId}`);
+  if (!el) return;
+  const liveTag = tags.get(tagId);
+  el.innerHTML = renderPassiveDistances(liveTag);
 }
 
 function addPassiveTag() {

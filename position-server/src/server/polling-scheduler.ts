@@ -26,17 +26,16 @@ const CONFIG_PATH = path.join(__dirname, '../../config/passive-tags.json');
 export class PollingScheduler {
   private passiveTags: PassiveTagConfig[] = [];
   private running = false;
-  /* Inter-cycle pause (after all anchors polled for all tags). 0 = run
-   * continuously; the cycle wall time is bounded by WiFi RTT for the
-   * last poll's report-back. */
-  private pollIntervalMs = 0;
+  /* Inter-cycle pause (after all anchors polled for all tags). Adjusted
+   * by the dashboard rate buttons (slow/normal/fast). Default 'normal'. */
+  private pollIntervalMs = 30;
   /* Per-poll timeout: WiFi RTT (~10–30 ms) + TWR exchange (~5 ms) + margin. */
   private pollTimeoutMs = 80;
   /* Inter-anchor spacing within a cycle. Must exceed the UWB TWR cycle
    * (~5 ms POLL→RESP→FINAL→REPORT) so the tag's single RX channel doesn't
    * collide. WiFi RTT for the previous anchor's report-back overlaps with
    * this gap, so total cycle wall time ≈ (N-1)*spacing + RTT. */
-  private interAnchorSpacingMs = 8;
+  private interAnchorSpacingMs = 30;
   private pendingPolls: Map<string, PendingPoll> = new Map();
 
   // Injected dependencies
@@ -162,7 +161,20 @@ export class PollingScheduler {
   }
 
   public setPollInterval(ms: number): void {
-    this.pollIntervalMs = Math.max(50, ms);
+    this.pollIntervalMs = Math.max(0, ms);
+  }
+
+  /** Set the inter-anchor spacing. Lower = higher rate but tighter UWB
+   * timing margin. Minimum 6 ms (TWR cycle is ~5 ms on air). */
+  public setInterAnchorSpacing(ms: number): void {
+    this.interAnchorSpacingMs = Math.max(6, ms);
+  }
+
+  public getRateConfig(): { spacingMs: number; pauseMs: number } {
+    return {
+      spacingMs: this.interAnchorSpacingMs,
+      pauseMs: this.pollIntervalMs,
+    };
   }
 
   private async pollLoop(): Promise<void> {

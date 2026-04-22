@@ -32,6 +32,15 @@ const RATE_TO_INTERVAL: Record<string, number> = {
   fast: 20,
 };
 
+/* Polling-scheduler rate presets. Spacing is the gap between consecutive
+ * anchor poll commands within a cycle (must exceed UWB TWR airtime ~5ms
+ * to avoid tag RX collision). Pause is the idle time at end of each cycle. */
+const RATE_TO_SCHEDULER: Record<string, { spacingMs: number; pauseMs: number }> = {
+  slow: { spacingMs: 80, pauseMs: 200 },
+  normal: { spacingMs: 30, pauseMs: 30 },
+  fast: { spacingMs: 8, pauseMs: 0 },
+};
+
 class WebSocketManager {
   private wss: WebSocketServer | null = null;
   private devices: Map<number, ConnectedDevice> = new Map();
@@ -272,27 +281,26 @@ class WebSocketManager {
   }
 
   private handleSetTagRate(ws: WebSocket, msg: { rate: string }): void {
-    const interval = RATE_TO_INTERVAL[msg.rate];
-    if (interval === undefined) {
+    const sched = RATE_TO_SCHEDULER[msg.rate];
+    if (!sched) {
       this.sendError(ws, `Unknown rate: ${msg.rate}`);
       return;
     }
 
     this.currentRate = msg.rate;
-    console.log(`Tag rate set to ${msg.rate} (poll_interval_ms=${interval})`);
-
-    // Send config to all connected tags
-    const configMsg = JSON.stringify({ type: 'config', poll_interval_ms: interval });
-    for (const device of this.devices.values()) {
-      if (device.deviceType === 'tag' && device.ws.readyState === WebSocket.OPEN) {
-        device.ws.send(configMsg);
-      }
-    }
+    pollingScheduler.setInterAnchorSpacing(sched.spacingMs);
+    pollingScheduler.setPollInterval(sched.pauseMs);
+    console.log(
+      `Rate set to ${msg.rate}: spacing=${sched.spacingMs}ms pause=${sched.pauseMs}ms`,
+    );
 
     // Notify all dashboards of the rate change
     this.broadcastToDashboard({ type: 'current_rate', rate: msg.rate });
-
-    this.broadcastLog('info', 'Rate changed', `${msg.rate} (${interval}ms per anchor)`);
+    this.broadcastLog(
+      'info',
+      'Rate changed',
+      `${msg.rate} (spacing=${sched.spacingMs}ms pause=${sched.pauseMs}ms)`,
+    );
   }
 
   private handleSetDeviceMode(msg: any): void {
