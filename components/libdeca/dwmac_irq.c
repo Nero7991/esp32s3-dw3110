@@ -159,7 +159,23 @@ void dwmac_irq_tx_done_cb(const dwt_cb_data_t* dat)
 		return;
 	}
 
+	/* If a response is expected (pto/rx_timeout set), the chip's
+	 * DWT_RESPONSE_EXPECTED auto-RX will fire reliably with a non-zero
+	 * RX window. We leave that path alone.
+	 *
+	 * Otherwise, when continuous RX is requested (rx_reenable) and no
+	 * response is expected on this TX — e.g. the DS-TWR REPORT, which is
+	 * a pure fire-and-forget — the chip's auto-RX with rx_timeout=0 and
+	 * pto=0 sometimes drops back to IDLE_PLL instead of entering RX.
+	 * The other IRQ handlers (rx_ok, rx_to, rx_err) all symmetrically
+	 * call dwt_rxenable under rx_reenable; this mirrors that so the
+	 * chip never lingers in IDLE_PLL after a TX completion. */
+	bool resp_expected
+		= current_tx->pto != 0 || current_tx->rx_timeout != 0;
 	dwmac_handle_tx_done();
+	if (!resp_expected && rx_reenable) {
+		dwt_rxenable(DWT_START_RX_IMMEDIATE);
+	}
 }
 
 void dwmac_irq_spi_err_cb(const dwt_cb_data_t* dat)

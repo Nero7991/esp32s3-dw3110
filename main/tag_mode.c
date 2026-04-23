@@ -105,10 +105,17 @@ static const char* tse_state_name(uint8_t v)
     }
 }
 
-/* Diagnostics + auto-recovery task: log responder activity periodically
- * and kick the RX if it has stalled (chip occasionally drops out of
- * continuous-RX mode after long uptime). On stall, captures the chip's
- * SYS_STATE so we can tell WHY it stalled. */
+/* Diagnostics + safety-net recovery.
+ *
+ * The real fix for the stall is in dwmac_irq_tx_done_cb — it now calls
+ * dwt_rxenable after a fire-and-forget TX (REPORT) when rx_reenable is
+ * set. Previously relied solely on the chip's DWT_RESPONSE_EXPECTED
+ * auto-RX, which occasionally failed silently and left the chip in
+ * IDLE_PLL.
+ *
+ * This task stays as a belt-and-suspenders probe: if somehow the chip
+ * still ends up stalled, detect it and heal.
+ */
 static void diag_task(void* arg)
 {
     (void)arg;
