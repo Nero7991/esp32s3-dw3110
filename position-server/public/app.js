@@ -928,7 +928,7 @@ function openCalibrateModal(tagId) {
     }
   });
 
-  overlay.classList.add('active');
+  overlay.classList.add('open');
 }
 
 function handleCalibrationStatus(msg) {
