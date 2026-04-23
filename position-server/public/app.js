@@ -184,14 +184,14 @@ function addAnchor3D(id, position) {
 
   const group = new THREE.Group();
 
-  // Body
-  const cubeGeom = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+  // Body (3 cm cube — matches ~real anchor PCB size)
+  const cubeGeom = new THREE.BoxGeometry(0.03, 0.03, 0.03);
   const cubeMat = new THREE.MeshPhongMaterial({ color: ANCHOR_COLOR });
   group.add(new THREE.Mesh(cubeGeom, cubeMat));
 
   // Pole to ground
   if (position.z > 0.05) {
-    const poleGeom = new THREE.CylinderGeometry(0.02, 0.02, position.z, 8);
+    const poleGeom = new THREE.CylinderGeometry(0.002, 0.002, position.z, 8);
     const poleMat = new THREE.MeshBasicMaterial({ color: 0xaeaeb2 });
     const pole = new THREE.Mesh(poleGeom, poleMat);
     pole.position.y = -position.z / 2;
@@ -200,7 +200,7 @@ function addAnchor3D(id, position) {
 
   // Label
   const label = makeLabel(`A${id}`);
-  label.position.y = 0.55;
+  label.position.y = 0.055;
   group.add(label);
 
   group.position.copy(uwbToThree(position.x, position.y, position.z));
@@ -250,13 +250,13 @@ function updateTag3D(id, position) {
     const color = TAG_PALETTE[tag.colorIdx % TAG_PALETTE.length];
     const group = new THREE.Group();
 
-    const sphereGeom = new THREE.SphereGeometry(0.15, 20, 20);
+    const sphereGeom = new THREE.SphereGeometry(0.015, 20, 20);
     const sphereMat = new THREE.MeshPhongMaterial({ color });
     group.add(new THREE.Mesh(sphereGeom, sphereMat));
 
     const hexColor = '#' + color.toString(16).padStart(6, '0');
     const label = makeLabel(`T${id}`, hexColor);
-    label.position.y = 0.45;
+    label.position.y = 0.045;
     group.add(label);
 
     scene.add(group);
