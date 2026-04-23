@@ -41,12 +41,27 @@ const RATE_TO_SCHEDULER: Record<string, { spacingMs: number; pauseMs: number }> 
   fast: { spacingMs: 8, pauseMs: 0 },
 };
 
+interface CalibrationCapture {
+  tagId: number;
+  truePos: { x: number; y: number; z: number };
+  samplesByAnchor: Map<number, number[]>;
+  endsAt: number;
+  resolve: () => void;
+}
+
 class WebSocketManager {
   private wss: WebSocketServer | null = null;
   private devices: Map<number, ConnectedDevice> = new Map();
   private wsToDevice: Map<WebSocket, number> = new Map();
   private dashboardClients: Set<WebSocket> = new Set();
   private currentRate: string = 'normal';
+
+  /* Per-anchor distance bias offsets in cm, keyed by anchorId.
+   * Applied on the receive path: stored_distance = reported + offset.
+   * Computed via the calibrate_tag flow (place tag at known position,
+   * collect samples, compute offset = true_distance - median_measured). */
+  private anchorOffsetsCm: Map<number, number> = new Map();
+  private activeCalibration: CalibrationCapture | null = null;
 
   public init(server: Server): void {
     this.wss = new WebSocketServer({ server, path: '/ws' });
@@ -148,6 +163,16 @@ class WebSocketManager {
 
         case 'set_device_mode':
           this.handleSetDeviceMode(message as any);
+          break;
+
+        case 'calibrate_tag':
+          this.handleCalibrateTag(ws, message as any);
+          break;
+
+        case 'reset_calibration':
+          this.anchorOffsetsCm.clear();
+          this.broadcastLog('info', 'Calibration reset', 'all anchor offsets cleared');
+          this.broadcastToDashboard({ type: 'calibration_offsets', offsets: {} });
           break;
 
         case 'stop_passive_polling':
@@ -315,6 +340,102 @@ class WebSocketManager {
     }
   }
 
+  /**
+   * Calibrate per-anchor distance offsets by placing the tag at a known
+   * position. Collects samples for `durationMs`, then for each anchor
+   * computes offset = true_distance - median(raw_samples). Offsets are
+   * applied on the ranging receive path.
+   */
+  private handleCalibrateTag(ws: WebSocket, msg: {
+    tagId: number;
+    x: number; y: number; z: number;
+    durationMs?: number;
+  }): void {
+    const duration = Math.max(500, Math.min(msg.durationMs || 3000, 20000));
+
+    if (this.activeCalibration) {
+      this.sendError(ws, 'Calibration already in progress');
+      return;
+    }
+    if (!this.devices.has(msg.tagId)) {
+      this.sendError(ws, `Tag id=${msg.tagId} not connected`);
+      return;
+    }
+
+    /* Clear prior offsets so the raw samples collected below reflect the
+     * uncorrected distances (handleRanging applies offset after capture,
+     * but by capturing msg.distance_cm directly we already have the raw
+     * value regardless — this just makes the logs less confusing). */
+    const priorOffsets = new Map(this.anchorOffsetsCm);
+    this.anchorOffsetsCm.clear();
+
+    const cap: CalibrationCapture = {
+      tagId: msg.tagId,
+      truePos: { x: msg.x, y: msg.y, z: msg.z },
+      samplesByAnchor: new Map(),
+      endsAt: Date.now() + duration,
+      resolve: () => {},
+    };
+    this.activeCalibration = cap;
+
+    console.log(`Calibration start: tag=${msg.tagId} pos=(${msg.x}, ${msg.y}, ${msg.z}) duration=${duration}ms`);
+    this.broadcastLog('info', 'Calibration start',
+      `tag=0x${msg.tagId.toString(16).padStart(4, '0')} at (${msg.x.toFixed(2)}, ${msg.y.toFixed(2)}, ${msg.z.toFixed(2)}) m`);
+    this.broadcastToDashboard({
+      type: 'calibration_status',
+      running: true,
+      tagId: msg.tagId,
+      endsAt: cap.endsAt,
+    });
+
+    setTimeout(() => {
+      if (this.activeCalibration !== cap) return; // canceled
+      const offsets: Record<number, { offsetCm: number; trueCm: number; medianMeasuredCm: number; samples: number }> = {};
+      for (const [anchorId, samples] of cap.samplesByAnchor) {
+        const a = anchorConfig.getAnchor(anchorId);
+        if (!a || samples.length < 3) continue; // need anchor position + min samples
+        const dx = a.position.x - cap.truePos.x;
+        const dy = a.position.y - cap.truePos.y;
+        const dz = a.position.z - cap.truePos.z;
+        const trueDistanceCm = Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz) * 100);
+
+        const sorted = [...samples].sort((a, b) => a - b);
+        const medianCm = sorted[Math.floor(sorted.length / 2)];
+        const offsetCm = Math.round(trueDistanceCm - medianCm);
+        this.anchorOffsetsCm.set(anchorId, offsetCm);
+        offsets[anchorId] = {
+          offsetCm,
+          trueCm: trueDistanceCm,
+          medianMeasuredCm: medianCm,
+          samples: samples.length,
+        };
+      }
+
+      // Restore any prior offsets for anchors that had no samples this run
+      for (const [id, off] of priorOffsets) {
+        if (!this.anchorOffsetsCm.has(id)) this.anchorOffsetsCm.set(id, off);
+      }
+
+      this.activeCalibration = null;
+
+      const offsetsForBroadcast: Record<number, number> = {};
+      for (const [id, off] of this.anchorOffsetsCm) offsetsForBroadcast[id] = off;
+
+      console.log('Calibration complete:', offsets);
+      const summary = Object.entries(offsets)
+        .map(([id, d]) => `A${id}: off=${d.offsetCm}cm (true=${d.trueCm} median=${d.medianMeasuredCm} n=${d.samples})`)
+        .join(' | ');
+      this.broadcastLog('info', 'Calibration done', summary || 'no samples');
+      this.broadcastToDashboard({
+        type: 'calibration_status',
+        running: false,
+        tagId: msg.tagId,
+        offsets: offsetsForBroadcast,
+        details: offsets,
+      });
+    }, duration);
+  }
+
   private handleLocateAnchor(msg: any): void {
     const id = msg.deviceId;
     if (this.sendToDevice(id, { type: 'locate' })) {
@@ -342,20 +463,36 @@ class WebSocketManager {
     // Let polling scheduler check if this is a response to a passive tag poll
     pollingScheduler.onRangingReport(msg.anchor_id, msg.tag_id, msg.distance_cm);
 
+    // Capture raw sample for calibration if one is in progress
+    if (this.activeCalibration
+        && this.activeCalibration.tagId === msg.tag_id
+        && Date.now() < this.activeCalibration.endsAt) {
+      let samples = this.activeCalibration.samplesByAnchor.get(msg.anchor_id);
+      if (!samples) {
+        samples = [];
+        this.activeCalibration.samplesByAnchor.set(msg.anchor_id, samples);
+      }
+      samples.push(msg.distance_cm);
+    }
+
+    // Apply calibration offset if present (raw + offset → corrected)
+    const offset = this.anchorOffsetsCm.get(msg.anchor_id) || 0;
+    const correctedCm = Math.max(0, msg.distance_cm + offset);
+
     // Add measurement to buffer
     rangingBuffer.addMeasurement({
       anchorId: msg.anchor_id,
       tagId: msg.tag_id,
-      distanceCm: msg.distance_cm,
+      distanceCm: correctedCm,
       timestamp: new Date(),
     });
 
-    console.log(`Ranging: anchor=${msg.anchor_id} tag=${msg.tag_id} dist=${msg.distance_cm}cm`);
+    console.log(`Ranging: anchor=${msg.anchor_id} tag=${msg.tag_id} dist=${correctedCm}cm` + (offset ? ` (raw=${msg.distance_cm}cm off=${offset})` : ''));
 
     this.broadcastLog(
       'info',
       'Ranging report',
-      `anchor=0x${msg.anchor_id.toString(16).toUpperCase().padStart(4, '0')} tag=0x${msg.tag_id.toString(16).toUpperCase().padStart(4, '0')} dist=${msg.distance_cm} cm`,
+      `anchor=0x${msg.anchor_id.toString(16).toUpperCase().padStart(4, '0')} tag=0x${msg.tag_id.toString(16).toUpperCase().padStart(4, '0')} dist=${correctedCm} cm`,
     );
 
     // Forward ranging data to dashboard for distance ring visualization
@@ -363,7 +500,7 @@ class WebSocketManager {
       type: 'ranging_update',
       anchorId: msg.anchor_id,
       tagId: msg.tag_id,
-      distanceCm: msg.distance_cm,
+      distanceCm: correctedCm,
     });
 
     // Try to compute position

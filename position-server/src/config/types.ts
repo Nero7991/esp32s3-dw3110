@@ -112,6 +112,19 @@ export interface SetDeviceModeMessage {
   mode: number; // 0=anchor, 1=tag, 2=passive_tag
 }
 
+export interface CalibrateTagMessage {
+  type: 'calibrate_tag';
+  tagId: number;
+  x: number;
+  y: number;
+  z: number;
+  durationMs?: number;
+}
+
+export interface ResetCalibrationMessage {
+  type: 'reset_calibration';
+}
+
 export type IncomingMessage =
   | RegisterMessage
   | RangingReport
@@ -122,7 +135,9 @@ export type IncomingMessage =
   | StartPassivePollingMessage
   | StopPassivePollingMessage
   | LocateAnchorMessage
-  | SetDeviceModeMessage;
+  | SetDeviceModeMessage
+  | CalibrateTagMessage
+  | ResetCalibrationMessage;
 export type OutgoingMessage = AnchorListMessage | PositionMessage | RegisteredMessage | ErrorMessage | LogEventMessage | DeviceUpdateMessage | DeviceListMessage | DashboardRangingMessage;
 
 export type LogEventLevel = 'info' | 'warn' | 'error';

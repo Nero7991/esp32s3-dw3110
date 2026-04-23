@@ -354,6 +354,7 @@ function handleMessage(msg) {
     case 'position':      handlePosition(msg); break;
     case 'current_rate':  setActiveRate(msg.rate); break;
     case 'passive_poll_status': handlePassivePollStatus(msg); break;
+    case 'calibration_status': handleCalibrationStatus(msg); break;
     case 'log_event':     appendLogEntry(msg); break;
   }
 }
@@ -440,12 +441,14 @@ function addConnectedTag(id, mac) {
     lastUpdate: null,
   });
   renderTagsSidebar();
+  renderPassiveTagsSidebar(); // may need to hide the passive entry
 }
 
 function removeConnectedTag(id) {
   removeTag3D(id);
   tags.delete(id);
   renderTagsSidebar();
+  renderPassiveTagsSidebar();
 }
 
 // ── Sidebar: Anchors ─────────────────────────────────────────────────────────
@@ -532,6 +535,7 @@ function renderTagsSidebar() {
       <div class="device-header">
         <span class="device-dot" style="background:${hex}"></span>
         <span class="device-name">Tag 0x${id.toString(16).padStart(4, '0').toUpperCase()}</span>
+        <button class="btn-locate" data-action="calibrate" data-id="${id}">Calibrate</button>
         <button class="btn-settings" data-id="${id}" data-type="tag">&#9881;</button>
         <span class="device-mac">${tag.mac}</span>
       </div>
@@ -542,6 +546,9 @@ function renderTagsSidebar() {
 
     card.querySelector('.btn-settings').addEventListener('click', () => {
       openSettings(id, 'tag', tag);
+    });
+    card.querySelector('[data-action="calibrate"]').addEventListener('click', () => {
+      openCalibrateModal(id);
     });
     container.appendChild(card);
   }
@@ -710,13 +717,18 @@ function renderPassiveTagsSidebar() {
     return;
   }
 
+  let rendered = 0;
   for (const tag of passiveTags) {
+    /* Skip if this id is already showing in the active Tags section
+     * (same physical device — the active-tag card already shows its
+     * distances and will gain calibrate/remove controls there). */
+    if (tags.has(tag.id)) continue;
+    rendered++;
+
     const card = document.createElement('div');
     card.className = 'device-card';
     card.id = `passive-card-${tag.id}`;
     const hex = '#ff453a';
-    /* Pull live distances from the same tags map used by the active list,
-     * keyed on the same device id. */
     const liveTag = tags.get(tag.id);
     const distHtml = renderPassiveDistances(liveTag);
     card.innerHTML = `
@@ -734,6 +746,10 @@ function renderPassiveTagsSidebar() {
       }
     });
     container.appendChild(card);
+  }
+
+  if (rendered === 0) {
+    container.innerHTML = '<p class="empty-state">All configured tags are connected (shown under Tags)</p>';
   }
 }
 
@@ -855,4 +871,78 @@ function initEventListeners() {
   document.getElementById('settings-modal').addEventListener('click', (e) => {
     if (e.target.id === 'settings-modal') closeSettings();
   });
+}
+
+// ── Calibration ──────────────────────────────────────────────────────────────
+
+function openCalibrateModal(tagId) {
+  const overlay = document.getElementById('settings-modal');
+  const title = document.getElementById('settings-title');
+  const body = document.getElementById('settings-body');
+
+  title.textContent = `Calibrate Tag 0x${tagId.toString(16).padStart(4, '0').toUpperCase()}`;
+  body.innerHTML = `
+    <div class="setting-row">
+      <span class="setting-label">How it works</span>
+    </div>
+    <div style="font-size:12px;color:#6e6e73;margin:4px 0 10px 0;line-height:1.4">
+      Place the tag at a known position, then enter the coordinates below.
+      The server will measure distances from each anchor for 3 seconds and
+      compute a per-anchor offset so reported distances match the physical
+      distance.
+    </div>
+    <div class="setting-row">
+      <span class="setting-label">Tag position (meters)</span>
+    </div>
+    <div class="coord-row" style="margin:6px 0">
+      <label>x<input type="number" step="0.01" id="cal-x" value="0"></label>
+      <label>y<input type="number" step="0.01" id="cal-y" value="0"></label>
+      <label>z<input type="number" step="0.01" id="cal-z" value="0"></label>
+    </div>
+    <div class="setting-row">
+      <span class="setting-label">Duration (ms)</span>
+      <input type="number" id="cal-dur" value="3000" style="width:80px">
+    </div>
+    <div style="display:flex;gap:6px;margin-top:10px">
+      <button class="btn-set" id="cal-start">Start Calibration</button>
+      <button class="btn-locate" id="cal-reset">Reset All Offsets</button>
+    </div>
+    <div id="cal-result" style="margin-top:10px;font-size:12px;color:#6e6e73"></div>
+  `;
+
+  document.getElementById('cal-start').addEventListener('click', () => {
+    const x = parseFloat(document.getElementById('cal-x').value) || 0;
+    const y = parseFloat(document.getElementById('cal-y').value) || 0;
+    const z = parseFloat(document.getElementById('cal-z').value) || 0;
+    const durationMs = parseInt(document.getElementById('cal-dur').value) || 3000;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'calibrate_tag', tagId, x, y, z, durationMs }));
+      document.getElementById('cal-result').textContent =
+        `Capturing for ${durationMs}ms...`;
+    }
+  });
+  document.getElementById('cal-reset').addEventListener('click', () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'reset_calibration' }));
+      document.getElementById('cal-result').textContent = 'Reset.';
+    }
+  });
+
+  overlay.classList.add('active');
+}
+
+function handleCalibrationStatus(msg) {
+  const el = document.getElementById('cal-result');
+  if (!el) return;
+  if (msg.running) {
+    el.textContent = `Collecting samples for tag 0x${msg.tagId.toString(16).padStart(4, '0').toUpperCase()}...`;
+  } else if (msg.details) {
+    const lines = [];
+    for (const [anchorId, d] of Object.entries(msg.details)) {
+      lines.push(
+        `A${anchorId}: offset=${d.offsetCm}cm (true=${d.trueCm}cm, median=${d.medianMeasuredCm}cm, n=${d.samples})`
+      );
+    }
+    el.innerHTML = 'Done:<br>' + lines.join('<br>') || 'No samples collected.';
+  }
 }

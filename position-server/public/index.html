@@ -184,6 +184,9 @@
       display: flex;
       align-items: center;
       gap: 7px;
+      min-width: 0;
+      flex-wrap: wrap;
+      row-gap: 4px;
     }
 
     .device-dot {
@@ -197,7 +200,11 @@
     .device-name {
       font-size: 13px;
       font-weight: 600;
-      flex-shrink: 0;
+      flex-shrink: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .device-mac {
@@ -205,6 +212,7 @@
       color: #86868b;
       font-family: "SF Mono", "Menlo", monospace;
       margin-left: auto;
+      flex-shrink: 0;
     }
 
     .coord-row {
