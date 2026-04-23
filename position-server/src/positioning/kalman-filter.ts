@@ -25,6 +25,8 @@ export class KalmanFilter {
 
   private is3D: boolean;
 
+  private initialized: boolean = false;
+
   constructor(is3D: boolean = true) {
     this.is3D = is3D;
     const dim = is3D ? 6 : 4;
@@ -50,11 +52,47 @@ export class KalmanFilter {
    * Update filter with new measurement.
    */
   public update(measurement: Position3D): Position3D {
+    // First-ever measurement (or post-reset): seed state directly from
+    // the measurement with zero velocity. Otherwise the filter starts
+    // at (0,0,0) and takes many cycles to catch up, meanwhile the
+    // velocity estimate blows up. */
+    if (!this.initialized) {
+      this.state[0] = measurement.x;
+      this.state[1] = measurement.y;
+      if (this.is3D) this.state[2] = measurement.z;
+      this.initialized = true;
+      return { x: measurement.x, y: measurement.y, z: this.is3D ? measurement.z : 0 };
+    }
+
     // Predict step
     this.predict();
 
     // Update step
     this.correct(measurement);
+
+    // Clamp velocity — UWB positioning is for indoor humans/drones,
+    // physical speeds above ~10 m/s are almost certainly estimation noise
+    // and cause the predict step to diverge. */
+    const vMax = 10.0;
+    const vxIdx = this.is3D ? 3 : 2;
+    for (let i = vxIdx; i < this.state.length; i++) {
+      if (this.state[i] > vMax) this.state[i] = vMax;
+      else if (this.state[i] < -vMax) this.state[i] = -vMax;
+    }
+
+    // If the filtered position drifted far from the measurement, the
+    // velocity estimate is unreliable — snap to measurement. */
+    const drift = Math.hypot(
+      this.state[0] - measurement.x,
+      this.state[1] - measurement.y,
+    );
+    if (drift > 2.0) {
+      this.state[0] = measurement.x;
+      this.state[1] = measurement.y;
+      if (this.is3D) this.state[2] = measurement.z;
+      // zero velocity state
+      for (let i = vxIdx; i < this.state.length; i++) this.state[i] = 0;
+    }
 
     return {
       x: this.state[0],
@@ -144,6 +182,7 @@ export class KalmanFilter {
     const dim = this.is3D ? 6 : 4;
     this.state = Array(dim).fill(0);
     this.P = Array(dim).fill(1.0);
+    this.initialized = false;
   }
 
   /**

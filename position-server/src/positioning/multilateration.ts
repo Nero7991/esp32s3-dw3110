@@ -21,6 +21,10 @@ interface PositionResult {
 }
 
 class MultilaterationEngine {
+  public clearFilters(): void {
+    for (const f of this.filters.values()) f.reset();
+  }
+
   // Minimum anchors needed for 3D positioning
   private minAnchors3D = 4;
   private minAnchors2D = 2;
@@ -78,6 +82,12 @@ class MultilaterationEngine {
     }
 
     const filtered = filter.update(position);
+
+    // Log the raw solver position vs filtered for debugging divergence
+    if (Math.abs(filtered.x - position.x) > 2 || Math.abs(filtered.y - position.y) > 2) {
+      console.log(`[MULTI] raw=(${position.x.toFixed(2)}, ${position.y.toFixed(2)}) filt=(${filtered.x.toFixed(2)}, ${filtered.y.toFixed(2)}) — filter diverging, resetting`);
+      filter.reset();
+    }
 
     // Calculate accuracy (residual error)
     const accuracyCm = this.calculateResidual(filtered, validAnchors) * 100;
@@ -158,11 +168,13 @@ class MultilaterationEngine {
       const maxStep = 1.0; // max 1 meter per iteration
       const scale = stepSize > maxStep ? maxStep / stepSize : 1.0;
 
-      // Update position
-      x += delta[0] * scale;
-      y += delta[1] * scale;
+      // Update position. Gauss-Newton step is Δβ = -(JᵀJ)⁻¹·Jᵀr since
+      // r_i = measured - model (convention used above). solveNormalEquations
+      // returns (JᵀJ)⁻¹·Jᵀr without the negation, so subtract here. */
+      x -= delta[0] * scale;
+      y -= delta[1] * scale;
       if (is3D && delta.length > 2) {
-        z += delta[2];
+        z -= delta[2];
       }
 
       // Check convergence

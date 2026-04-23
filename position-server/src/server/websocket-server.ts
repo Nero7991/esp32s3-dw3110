@@ -171,6 +171,7 @@ class WebSocketManager {
 
         case 'reset_calibration':
           this.anchorOffsetsCm.clear();
+          positionEngine.clearFilters();
           this.broadcastLog('info', 'Calibration reset', 'all anchor offsets cleared');
           this.broadcastToDashboard({ type: 'calibration_offsets', offsets: {} });
           break;
@@ -417,6 +418,7 @@ class WebSocketManager {
       }
 
       this.activeCalibration = null;
+      positionEngine.clearFilters(); // offsets changed — drop stale Kalman state
 
       const offsetsForBroadcast: Record<number, number> = {};
       for (const [id, off] of this.anchorOffsetsCm) offsetsForBroadcast[id] = off;

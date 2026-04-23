@@ -611,13 +611,7 @@ function clearLog() {
 }
 
 function updateLogBadge() {
-  const badge = document.getElementById('log-badge');
-  if (logUnread > 0 && !logVisible) {
-    badge.textContent = logUnread > 99 ? '99+' : String(logUnread);
-    badge.style.display = 'inline-block';
-  } else {
-    badge.style.display = 'none';
-  }
+  /* Badge removed from UI — noop. */
 }
 
 function formatLogTime(iso) {
