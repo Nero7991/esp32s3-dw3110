@@ -72,13 +72,48 @@ static void tag_error_handler(uint32_t status)
     (void)status;
 }
 
+/* SYS_STATE_LO @ 0xF0030 — byte layout (DW3000 UM §8.2.14.19):
+ *   bits [7:0]    RX_STATE (sub-state within RX state machine)
+ *   bits [15:8]   reserved
+ *   bits [23:16]  TSE_STATE  (top-level state machine):
+ *                   0x0 INIT_RC, 0x1 SLEEPING, 0x2 WAKE_UP,
+ *                   0x3 IDLE_PLL, 0x4 TX_WAIT, 0x5 TX_DELAY, 0x6 TX,
+ *                   0x7 RX_WAIT, 0x8 RX_DELAY, 0x9 PREAMBLE_HUNT,
+ *                   0xA SFD_HUNT, 0xB RX, 0xC RX_DONE, 0xD FAIL (stuck)
+ *   bits [31:24]  PMSC_STATE (power management SM)
+ */
+#define SYS_STATE_LO_REG_ID 0xF0030UL
+
+static const char* tse_state_name(uint8_t v)
+{
+    switch (v) {
+        case 0x0: return "INIT_RC";
+        case 0x1: return "SLEEP";
+        case 0x2: return "WAKE";
+        case 0x3: return "IDLE_PLL";
+        case 0x4: return "TX_WAIT";
+        case 0x5: return "TX_DELAY";
+        case 0x6: return "TX";
+        case 0x7: return "RX_WAIT";
+        case 0x8: return "RX_DELAY";
+        case 0x9: return "HUNT_PRE";
+        case 0xA: return "HUNT_SFD";
+        case 0xB: return "RX";
+        case 0xC: return "RX_DONE";
+        case 0xD: return "FAIL";
+        default:  return "?";
+    }
+}
+
 /* Diagnostics + auto-recovery task: log responder activity periodically
  * and kick the RX if it has stalled (chip occasionally drops out of
- * continuous-RX mode after long uptime). */
+ * continuous-RX mode after long uptime). On stall, captures the chip's
+ * SYS_STATE so we can tell WHY it stalled. */
 static void diag_task(void* arg)
 {
     (void)arg;
     uint32_t prev_count = 0;
+    uint32_t prev_txf = 0, prev_crcg = 0;
     uint32_t consecutive_idle = 0;
     while (s_running) {
         vTaskDelay(pdMS_TO_TICKS(5000));
@@ -88,20 +123,41 @@ static void diag_task(void* arg)
         dwt_readeventcounters(&counters);
         uint32_t cur = s_responder_count;
         uint32_t delta = cur - prev_count;
+        uint32_t sys_state = dwt_read_reg(SYS_STATE_LO_REG_ID);
+        uint8_t tse = (sys_state >> 16) & 0xFF;
+        uint8_t pmsc = (sys_state >> 24) & 0xFF;
+        uint8_t rx_sub = sys_state & 0xFF;
+
         ESP_LOGI(TAG,
-                 "Responder: %lu polls (last 5s: %lu) last anchor=0x%04X "
-                 "dist=%u cm | CRCG=%u TXF=%u",
+                 "Responder: %lu polls (5s:%lu) anc=0x%04X d=%u cm | "
+                 "TSE=0x%02X(%s) PMSC=0x%02X RXsub=0x%02X | "
+                 "CRCG+%lu TXF+%lu PHE=%lu SFDTO=%lu PTO=%lu RTO=%lu RSL=%lu ARFE=%lu",
                  (unsigned long)cur, (unsigned long)delta,
                  s_last_anchor_id, s_last_distance,
-                 counters.CRCG, counters.TXF);
+                 tse, tse_state_name(tse), pmsc, rx_sub,
+                 (unsigned long)(counters.CRCG - prev_crcg),
+                 (unsigned long)(counters.TXF - prev_txf),
+                 (unsigned long)counters.PHE, (unsigned long)counters.SFDTO,
+                 (unsigned long)counters.PTO, (unsigned long)counters.RTO,
+                 (unsigned long)counters.RSL, (unsigned long)counters.ARFE);
         prev_count = cur;
+        prev_txf = counters.TXF;
+        prev_crcg = counters.CRCG;
 
-        /* If we've been idle for two intervals (10 s), kick the radio.
-         * Drop continuous RX, force trx off, re-arm. */
+        /* If idle for two intervals (10 s), dump the stall cause then heal. */
         if (delta == 0) {
             consecutive_idle++;
             if (consecutive_idle >= 2) {
-                ESP_LOGW(TAG, "RX stalled, kicking radio");
+                /* Re-read state after a short delay — sometimes the first
+                 * read is from a transient state. */
+                vTaskDelay(pdMS_TO_TICKS(20));
+                uint32_t s2 = dwt_read_reg(SYS_STATE_LO_REG_ID);
+                uint8_t tse2 = (s2 >> 16) & 0xFF;
+                uint8_t pmsc2 = (s2 >> 24) & 0xFF;
+                ESP_LOGW(TAG,
+                         "STALL ANALYSIS: stuck in TSE=0x%02X(%s) PMSC=0x%02X "
+                         "(raw=0x%08lX). Kicking radio.",
+                         tse2, tse_state_name(tse2), pmsc2, (unsigned long)s2);
                 dwmac_set_rx_reenable(false);
                 dwt_forcetrxoff();
                 dwt_setdwstate(DWT_DW_IDLE_RC);
